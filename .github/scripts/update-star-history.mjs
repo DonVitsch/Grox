@@ -35,7 +35,8 @@ const starredAt = stars
   .sort((a, b) => a - b);
 const now = Date.now();
 const start = Math.min(Date.parse(repo.created_at), starredAt[0] ?? now);
-const end = Math.max(now, start + 86_400_000);
+const latestEvent = starredAt.at(-1) ?? start;
+const end = Math.max(latestEvent, start + 86_400_000);
 const points = [{ time: start, count: 0 }];
 for (let index = 0; index < starredAt.length; index += 1) {
   points.push({ time: starredAt[index], count: index + 1 });
@@ -77,7 +78,7 @@ function chart(theme) {
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">
   <title id="title">${repository} Star History</title>
-  <desc id="desc">GitHub Star 历史曲线，当前 ${starredAt.length} Stars，更新于 ${new Date(now).toISOString()}</desc>
+  <desc id="desc">GitHub Star 历史曲线，当前 ${starredAt.length} Stars，数据截至 ${new Date(latestEvent).toISOString()}</desc>
   <rect width="${width}" height="${height}" rx="14" fill="${background}"/>
   <text x="${left}" y="30" fill="${foreground}" font-family="system-ui,Segoe UI,sans-serif" font-size="17" font-weight="650">${repository} Star History</text>
   <text x="${width - right}" y="30" text-anchor="end" fill="${accent}" font-family="system-ui,Segoe UI,sans-serif" font-size="17" font-weight="700">★ ${starredAt.length}</text>
@@ -90,7 +91,7 @@ function chart(theme) {
   <path d="${area}" fill="${fill}"/>
   <path d="${line}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="${x(end).toFixed(1)}" cy="${y(starredAt.length).toFixed(1)}" r="4.5" fill="${background}" stroke="${accent}" stroke-width="3"/>
-  <text x="${left}" y="${height - 5}" fill="${muted}" font-family="system-ui,Segoe UI,sans-serif" font-size="9">每小时由 GitHub Actions 更新 · ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} UTC</text>
+  <text x="${left}" y="${height - 5}" fill="${muted}" font-family="system-ui,Segoe UI,sans-serif" font-size="9">每小时检查更新 · 最新 Star ${new Date(latestEvent).toISOString().slice(0, 16).replace("T", " ")} UTC</text>
 </svg>
 `;
 }
