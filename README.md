@@ -112,5 +112,3 @@ Grox 持续追踪 `xai-org/grok-build` 的官方发布、ACP 协议和功能变�
     <img alt="Grox Star History Chart" src="https://raw.githubusercontent.com/dandandujie/Grox/main/.github/assets/star-history.svg" />
   </picture>
 </a>
-
-曲线由 GitHub Actions 每小时通过 Stargazers API 自动刷新，访问凭据仅保存在仓库 Secret 中。
