@@ -113,6 +113,7 @@ interface DesktopState {
 
   inspectorOpen: boolean;
   inspectorTab: InspectorTab;
+  terminalOpen: boolean;
   paletteOpen: boolean;
   settingsOpen: boolean;
   historySyncing: boolean;
@@ -175,6 +176,7 @@ interface DesktopState {
   setInspectorTab(tab: InspectorTab): void;
   setPlanPreviewOpen(open: boolean): void;
   toggleInspector(): void;
+  toggleTerminal(): void;
   setPaletteOpen(open: boolean): void;
   setSettingsOpen(open: boolean): void;
   refreshHistory(): Promise<void>;
@@ -676,8 +678,9 @@ export const useDesktop = create<DesktopState>((set, get) => {
           : "default",
     sessionComposers: loadSessionComposers(),
 
-    inspectorOpen: true,
+    inspectorOpen: false,
     inspectorTab: "files",
+    terminalOpen: false,
     paletteOpen: false,
     settingsOpen: false,
     historySyncing: false,
@@ -1329,6 +1332,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
     setInspectorTab: (inspectorTab) => set({ inspectorTab, inspectorOpen: true }),
     setPlanPreviewOpen: (planPreviewOpen) => set({ planPreviewOpen, ...(planPreviewOpen ? { previewOpen: false } : {}) }),
     toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
+    toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),
     setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
     setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
     async refreshHistory() {

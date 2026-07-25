@@ -1,6 +1,6 @@
 [package]
 name = "grox-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "Grox desktop agent powered by Grok Build"
 edition = "2021"
 rust-version = "1.77"
@@ -25,3 +25,4 @@ percent-encoding = "2"
 rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 semver = "1"
+sha2 = "0.10"

@@ -102,3 +102,13 @@ Grox 持续追踪 `xai-org/grok-build` 的官方发布、ACP 协议和功能变�
 ## 友情链接
 
 - [LINUX DO](https://linux.do)
+
+## Star History
+
+<a href="https://www.star-history.com/#dandandujie/Grox&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date" />
+    <img alt="Grox Star History Chart" src="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date" />
+  </picture>
+</a>

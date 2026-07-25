@@ -283,13 +283,34 @@ export class MockBridge implements GrokBridge {
 
   async listRewindPoints(sessionId: string) {
     const session = this.sessions.get(sessionId);
-    return (session?.blocks.filter((block) => block.type === "user") ?? []).map((block, index) => ({
-      prompt_index: index,
-      created_at: new Date(block.ts).toISOString(),
-      num_file_snapshots: 0,
-      has_file_changes: false,
-      prompt_preview: block.type === "user" ? block.text.slice(0, 120) : undefined,
-    }));
+    const points: {
+      prompt_index: number;
+      created_at: string;
+      num_file_snapshots: number;
+      has_file_changes: boolean;
+      prompt_preview?: string;
+    }[] = [];
+    const changedFiles: Set<string>[] = [];
+    let promptIndex = -1;
+    for (const block of session?.blocks ?? []) {
+      if (block.type === "user") {
+        promptIndex += 1;
+        changedFiles[promptIndex] = new Set();
+        points.push({
+          prompt_index: promptIndex,
+          created_at: new Date(block.ts).toISOString(),
+          num_file_snapshots: 0,
+          has_file_changes: false,
+          prompt_preview: block.text.slice(0, 120),
+        });
+      } else if (block.type === "tool" && promptIndex >= 0) {
+        for (const hunk of block.call.diff ?? []) changedFiles[promptIndex].add(hunk.path);
+      }
+    }
+    return points.map((point) => {
+      const count = changedFiles[point.prompt_index]?.size ?? 0;
+      return { ...point, num_file_snapshots: count, has_file_changes: count > 0 };
+    });
   }
 
   async rewind(sessionId: string, targetPromptIndex: number, mode: RewindMode, force: boolean): Promise<RewindResult> {
@@ -297,28 +318,39 @@ export class MockBridge implements GrokBridge {
     if (!session) throw new Error("会话不存在");
     const point = (await this.listRewindPoints(sessionId)).find((item) => item.prompt_index === targetPromptIndex);
     if (!point) throw new Error("回退节点不存在");
+    const changedFiles = new Set<string>();
+    let activePrompt = -1;
+    for (const block of session.blocks) {
+      if (block.type === "user") activePrompt += 1;
+      if (activePrompt === targetPromptIndex && block.type === "tool") {
+        for (const hunk of block.call.diff ?? []) changedFiles.add(hunk.path);
+      }
+    }
+    const files = [...changedFiles];
     if (!force) {
       return {
         success: false,
         target_prompt_index: targetPromptIndex,
         mode,
         reverted_files: [],
-        clean_files: [],
+        clean_files: mode === "conversation_only" ? [] : files,
         conflicts: [],
       };
     }
-    let prompts = 0;
-    session.blocks = session.blocks.filter((block) => {
-      if (block.type === "user") prompts += 1;
-      return prompts <= targetPromptIndex;
-    });
-    this.emit({ type: "session_ready", session: structuredClone(session) });
+    if (mode !== "files_only") {
+      let prompts = -1;
+      session.blocks = session.blocks.filter((block) => {
+        if (block.type === "user") prompts += 1;
+        return prompts < targetPromptIndex;
+      });
+      this.emit({ type: "session_ready", session: structuredClone(session) });
+    }
     return {
       success: true,
       target_prompt_index: targetPromptIndex,
       mode,
-      reverted_files: [],
-      clean_files: [],
+      reverted_files: mode === "conversation_only" ? [] : files,
+      clean_files: mode === "conversation_only" ? [] : files,
       conflicts: [],
       prompt_text: mode === "files_only" ? undefined : point.prompt_preview,
     };

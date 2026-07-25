@@ -124,6 +124,21 @@ struct WorkspaceEntry {
     is_dir: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitSummary {
+    is_repository: bool,
+    branch: Option<String>,
+    branches: Vec<String>,
+    added: u64,
+    removed: u64,
+    changed_files: usize,
+    remote_url: Option<String>,
+    default_branch: Option<String>,
+    ahead: u64,
+    behind: u64,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GrokRuntimeInfo {
@@ -142,6 +157,16 @@ struct GitHubRelease {
     body: Option<String>,
     html_url: String,
     published_at: Option<String>,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+    digest: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -153,6 +178,9 @@ struct UpdateInfo {
     notes: String,
     release_url: String,
     published_at: Option<String>,
+    installable: bool,
+    asset_name: Option<String>,
+    requires_xattr: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -231,8 +259,8 @@ impl ProviderApiBackend {
                     "new-api",
                     "new api",
                 ]
-                    .iter()
-                    .any(|marker| identity.contains(marker))
+                .iter()
+                .any(|marker| identity.contains(marker))
                 {
                     "responses"
                 } else {
@@ -696,7 +724,10 @@ fn grok_binary_version(path: &str) -> Option<String> {
         use std::os::windows::process::CommandExt as _;
         command.creation_flags(0x0800_0000);
     }
-    let output = command.output().ok().filter(|output| output.status.success())?;
+    let output = command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
     String::from_utf8(output.stdout)
         .ok()?
         .lines()
@@ -1201,6 +1232,161 @@ fn list_workspace_files(cwd: String) -> Result<Vec<WorkspaceEntry>, String> {
     Ok(output)
 }
 
+fn git_command(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .output()
+        .map_err(|error| format!("无法运行 Git：{error}"))
+}
+
+fn git_text(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_command(root, args)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("Git 命令失败：git {}", args.join(" "))
+        } else {
+            detail
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn optional_git_text(root: &Path, args: &[&str]) -> Option<String> {
+    git_text(root, args).ok().filter(|value| !value.is_empty())
+}
+
+#[tauri::command]
+fn git_summary(cwd: String) -> Result<GitSummary, String> {
+    let root = checked_workspace(&cwd)?;
+    let is_repository = optional_git_text(&root, &["rev-parse", "--is-inside-work-tree"])
+        .is_some_and(|value| value == "true");
+    if !is_repository {
+        return Ok(GitSummary {
+            is_repository: false,
+            branch: None,
+            branches: Vec::new(),
+            added: 0,
+            removed: 0,
+            changed_files: 0,
+            remote_url: None,
+            default_branch: None,
+            ahead: 0,
+            behind: 0,
+        });
+    }
+
+    let branch = optional_git_text(&root, &["branch", "--show-current"]);
+    let branches = optional_git_text(&root, &["branch", "--format=%(refname:short)"])
+        .map(|value| value.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let status = optional_git_text(&root, &["status", "--porcelain=v1"]).unwrap_or_default();
+    let changed_files = status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let numstat = optional_git_text(&root, &["diff", "--numstat", "HEAD"])
+        .or_else(|| optional_git_text(&root, &["diff", "--numstat"]))
+        .unwrap_or_default();
+    let (added, removed) = numstat
+        .lines()
+        .fold((0_u64, 0_u64), |(added, removed), line| {
+            let mut columns = line.split('\t');
+            let next_added = columns
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let next_removed = columns
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            (added + next_added, removed + next_removed)
+        });
+    let remote_url = optional_git_text(&root, &["remote", "get-url", "origin"]);
+    let default_branch = optional_git_text(
+        &root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|value| value.split_once('/').map(|(_, branch)| branch.to_string()));
+    let (behind, ahead) = optional_git_text(
+        &root,
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+    )
+    .and_then(|value| {
+        let mut counts = value.split_whitespace();
+        Some((counts.next()?.parse().ok()?, counts.next()?.parse().ok()?))
+    })
+    .unwrap_or((0, 0));
+
+    Ok(GitSummary {
+        is_repository,
+        branch,
+        branches,
+        added,
+        removed,
+        changed_files,
+        remote_url,
+        default_branch,
+        ahead,
+        behind,
+    })
+}
+
+#[tauri::command]
+fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
+    let root = checked_workspace(&cwd)?;
+    let branch = branch.trim();
+    let branches = git_text(&root, &["branch", "--format=%(refname:short)"])?;
+    if branch.is_empty() || !branches.lines().any(|candidate| candidate == branch) {
+        return Err("只能切换到当前仓库已有的本地分支".into());
+    }
+    git_text(&root, &["switch", branch])?;
+    Ok(format!("已切换到 {branch}"))
+}
+
+#[tauri::command]
+fn git_commit(cwd: String, message: String) -> Result<String, String> {
+    let root = checked_workspace(&cwd)?;
+    let message = message.trim();
+    if message.is_empty() || message.len() > 200 || message.chars().any(char::is_control) {
+        return Err("提交说明需为 1–200 个字符，且不能包含控制字符".into());
+    }
+    git_text(&root, &["add", "--all"])?;
+    git_text(&root, &["commit", "-m", message])?;
+    Ok("提交已创建".into())
+}
+
+#[tauri::command]
+fn git_push(cwd: String) -> Result<String, String> {
+    let root = checked_workspace(&cwd)?;
+    let branch = git_text(&root, &["branch", "--show-current"])?;
+    if branch.is_empty() {
+        return Err("当前处于 detached HEAD，无法直接推送".into());
+    }
+    let has_upstream = optional_git_text(
+        &root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .is_some();
+    if has_upstream {
+        git_text(&root, &["push"])?;
+    } else {
+        git_text(&root, &["push", "--set-upstream", "origin", &branch])?;
+    }
+    Ok("推送已完成".into())
+}
+
 fn static_preview_mime(path: &Path) -> &'static str {
     match path
         .extension()
@@ -1282,7 +1468,14 @@ async fn handle_static_preview_request(
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
     let Some(first_segment) = segments.first() else {
-        send_static_preview_response(&mut stream, "404 Not Found", "text/plain", b"Not found", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"Not found",
+            head_only,
+        )
+        .await;
         return;
     };
     let (root, path_start) = {
@@ -1295,7 +1488,14 @@ async fn handle_static_preview_request(
             // preview, so they can safely resolve inside that same workspace.
             (roots.values().next().expect("one preview root").clone(), 0)
         } else {
-            send_static_preview_response(&mut stream, "404 Not Found", "text/plain", b"Not found", head_only).await;
+            send_static_preview_response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain",
+                b"Not found",
+                head_only,
+            )
+            .await;
             return;
         }
     };
@@ -1303,7 +1503,14 @@ async fn handle_static_preview_request(
     let mut candidate = root.clone();
     for encoded in &segments[path_start..] {
         let Ok(decoded) = percent_decode_str(encoded).decode_utf8() else {
-            send_static_preview_response(&mut stream, "400 Bad Request", "text/plain", b"Bad path", head_only).await;
+            send_static_preview_response(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain",
+                b"Bad path",
+                head_only,
+            )
+            .await;
             return;
         };
         if decoded.is_empty()
@@ -1313,7 +1520,14 @@ async fn handle_static_preview_request(
             || decoded.contains('\\')
             || decoded.chars().any(char::is_control)
         {
-            send_static_preview_response(&mut stream, "400 Bad Request", "text/plain", b"Bad path", head_only).await;
+            send_static_preview_response(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain",
+                b"Bad path",
+                head_only,
+            )
+            .await;
             return;
         }
         candidate.push(decoded.as_ref());
@@ -1322,23 +1536,58 @@ async fn handle_static_preview_request(
         candidate.push("index.html");
     }
     let Ok(candidate) = candidate.canonicalize() else {
-        send_static_preview_response(&mut stream, "404 Not Found", "text/plain", b"Not found", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"Not found",
+            head_only,
+        )
+        .await;
         return;
     };
     if !candidate.starts_with(&root) || !candidate.is_file() {
-        send_static_preview_response(&mut stream, "403 Forbidden", "text/plain", b"Forbidden", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "403 Forbidden",
+            "text/plain",
+            b"Forbidden",
+            head_only,
+        )
+        .await;
         return;
     }
     let Ok(metadata) = fs::metadata(&candidate) else {
-        send_static_preview_response(&mut stream, "404 Not Found", "text/plain", b"Not found", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"Not found",
+            head_only,
+        )
+        .await;
         return;
     };
     if metadata.len() > MAX_PREVIEW_BYTES {
-        send_static_preview_response(&mut stream, "413 Content Too Large", "text/plain", b"File too large", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "413 Content Too Large",
+            "text/plain",
+            b"File too large",
+            head_only,
+        )
+        .await;
         return;
     }
     let Ok(body) = fs::read(&candidate) else {
-        send_static_preview_response(&mut stream, "500 Internal Server Error", "text/plain", b"Read failed", head_only).await;
+        send_static_preview_response(
+            &mut stream,
+            "500 Internal Server Error",
+            "text/plain",
+            b"Read failed",
+            head_only,
+        )
+        .await;
         return;
     };
     send_static_preview_response(
@@ -1955,11 +2204,7 @@ async fn acp_spawn(
     // logs and may be read by newer upstream builds; a stale "0.2.0" there
     // both misleads auth diagnostics and can trip the server-side version
     // gate that answers inference with 403 "Grok Build is coming soon".
-    if let Some(version) = runtime
-        .version
-        .as_deref()
-        .and_then(cli_version_number)
-    {
+    if let Some(version) = runtime.version.as_deref().and_then(cli_version_number) {
         command.env("GROK_CLIENT_VERSION", version.to_string());
     }
     if let Ok(home) = grok_home() {
@@ -2163,14 +2408,41 @@ fn update_available(current: &str, latest: &str) -> Result<bool, String> {
     Ok(release_version(latest)? > release_version(current)?)
 }
 
-#[tauri::command]
-async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
-    let client = reqwest::Client::builder()
+fn update_asset_matches(name: &str, platform: &str, architecture: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    match platform {
+        "windows" => {
+            let architecture = if architecture == "aarch64" {
+                "arm64"
+            } else {
+                "x64"
+            };
+            name.ends_with("-setup.exe") && name.contains(architecture)
+        }
+        "macos" => {
+            let architecture_matches = if architecture == "aarch64" {
+                name.contains("aarch64") || name.contains("arm64")
+            } else {
+                name.contains("x64") || name.contains("x86_64")
+            };
+            name.ends_with(".dmg") && architecture_matches
+        }
+        _ => false,
+    }
+}
+
+fn update_asset(release: &GitHubRelease) -> Option<&GitHubAsset> {
+    release.assets.iter().find(|asset| {
+        update_asset_matches(&asset.name, std::env::consts::OS, std::env::consts::ARCH)
+    })
+}
+
+async fn latest_release() -> Result<GitHubRelease, String> {
+    reqwest::Client::builder()
         .user_agent(format!("Grox/{CLIENT_VERSION}"))
-        .timeout(std::time::Duration::from_secs(12))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|error| format!("无法创建更新检查客户端：{error}"))?;
-    let release = client
+        .map_err(|error| format!("无法创建更新客户端：{error}"))?
         .get(LATEST_RELEASE_URL)
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -2180,12 +2452,18 @@ async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .map_err(|error| format!("更新服务返回错误：{error}"))?
         .json::<GitHubRelease>()
         .await
-        .map_err(|error| format!("无法读取更新信息：{error}"))?;
+        .map_err(|error| format!("无法读取更新信息：{error}"))
+}
+
+#[tauri::command]
+async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
+    let release = latest_release().await?;
 
     if !update_available(CLIENT_VERSION, &release.tag_name)? {
         return Ok(None);
     }
 
+    let asset_name = update_asset(&release).map(|asset| asset.name.clone());
     let latest_version = release.tag_name.trim().trim_start_matches(['v', 'V']);
     let notes = release
         .body
@@ -2203,7 +2481,233 @@ async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         notes,
         release_url: release.html_url,
         published_at: release.published_at,
+        installable: asset_name.is_some(),
+        asset_name,
+        requires_xattr: cfg!(target_os = "macos"),
     }))
+}
+
+fn update_temp_dir(version: &str) -> Result<PathBuf, String> {
+    let safe_version = release_version(version)?.to_string();
+    let directory = std::env::temp_dir().join(format!(
+        "grox-update-{safe_version}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建更新临时目录：{error}"))?;
+    Ok(directory)
+}
+
+async fn download_update_asset(asset: &GitHubAsset, target: &Path) -> Result<(), String> {
+    use sha2::{Digest as _, Sha256};
+
+    if asset.size == 0 || asset.size > 250 * 1024 * 1024 {
+        return Err("更新安装包大小异常".into());
+    }
+    let url = url::Url::parse(&asset.browser_download_url)
+        .map_err(|error| format!("无效的更新下载地址：{error}"))?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        return Err("更新安装包不是来自受信任的 GitHub 发布地址".into());
+    }
+    let response = reqwest::Client::builder()
+        .user_agent(format!("Grox/{CLIENT_VERSION}"))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|error| format!("无法创建更新下载客户端：{error}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("无法下载更新：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("更新下载失败：{error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > 250 * 1024 * 1024)
+    {
+        return Err("更新安装包超过 250 MB".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("无法读取更新安装包：{error}"))?;
+    if bytes.is_empty() || bytes.len() as u64 > 250 * 1024 * 1024 {
+        return Err("下载到的更新安装包大小异常".into());
+    }
+    let expected_digest = asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| "GitHub Release 未提供安装包 SHA-256，已拒绝自动安装".to_string())?;
+    let actual_digest = format!("{:x}", Sha256::digest(&bytes));
+    if !actual_digest.eq_ignore_ascii_case(expected_digest) {
+        return Err("更新安装包 SHA-256 校验失败，已取消安装".into());
+    }
+    fs::write(target, bytes).map_err(|error| format!("无法保存更新安装包：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn launch_update_helper(
+    app: &tauri::AppHandle,
+    installer: &Path,
+    work: &Path,
+) -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法定位当前 Grox：{error}"))?;
+    let script = work.join("install-update.ps1");
+    fs::write(
+        &script,
+        r#"param([int]$GroxPid, [string]$Installer, [string]$AppPath, [string]$WorkDir)
+Wait-Process -Id $GroxPid -ErrorAction SilentlyContinue
+$process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
+if ($process.ExitCode -eq 0 -and (Test-Path -LiteralPath $AppPath)) {
+  Start-Process -FilePath $AppPath
+}
+Start-Sleep -Seconds 2
+Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+"#,
+    )
+    .map_err(|error| format!("无法创建更新辅助脚本：{error}"))?;
+    use std::os::windows::process::CommandExt as _;
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script)
+        .arg("-GroxPid")
+        .arg(std::process::id().to_string())
+        .arg("-Installer")
+        .arg(installer)
+        .arg("-AppPath")
+        .arg(executable)
+        .arg("-WorkDir")
+        .arg(work)
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|error| format!("无法启动更新安装程序：{error}"))?;
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn current_app_bundle() -> Result<PathBuf, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法定位当前 Grox：{error}"))?;
+    executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "当前 Grox 不是从 .app 应用包运行，无法自动替换".into())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_update_helper(
+    app: &tauri::AppHandle,
+    installer: &Path,
+    work: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let target = current_app_bundle()?;
+    let script = work.join("install-update.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -u
+GROX_PID="$1"
+DMG="$2"
+TARGET="$3"
+WORK="$4"
+while kill -0 "$GROX_PID" 2>/dev/null; do sleep 0.25; done
+MOUNT="$WORK/mount"
+BACKUP="$WORK/Grox-backup.app"
+mkdir -p "$MOUNT"
+cleanup() {
+  /usr/bin/hdiutil detach "$MOUNT" -quiet >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+/usr/bin/hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT" -quiet || exit 20
+SOURCE="$(/usr/bin/find "$MOUNT" -maxdepth 1 -type d -name '*.app' -print -quit)"
+[ -n "$SOURCE" ] || exit 21
+PARENT="$(/usr/bin/dirname "$TARGET")"
+if [ -w "$PARENT" ]; then
+  [ ! -e "$TARGET" ] || /usr/bin/ditto "$TARGET" "$BACKUP"
+  /bin/rm -rf "$TARGET"
+  if ! /usr/bin/ditto "$SOURCE" "$TARGET"; then
+    [ ! -e "$BACKUP" ] || /usr/bin/ditto "$BACKUP" "$TARGET"
+    exit 22
+  fi
+  /usr/bin/xattr -dr com.apple.quarantine "$TARGET" || exit 23
+else
+  export GROX_UPDATE_SOURCE="$SOURCE" GROX_UPDATE_TARGET="$TARGET" GROX_UPDATE_BACKUP="$BACKUP"
+  /usr/bin/osascript <<'APPLESCRIPT' || exit 24
+set sourcePath to system attribute "GROX_UPDATE_SOURCE"
+set targetPath to system attribute "GROX_UPDATE_TARGET"
+set backupPath to system attribute "GROX_UPDATE_BACKUP"
+set commandText to "/usr/bin/ditto " & quoted form of targetPath & " " & quoted form of backupPath & " 2>/dev/null || true; /bin/rm -rf " & quoted form of targetPath & "; if /usr/bin/ditto " & quoted form of sourcePath & " " & quoted form of targetPath & "; then /usr/bin/xattr -dr com.apple.quarantine " & quoted form of targetPath & "; else /usr/bin/ditto " & quoted form of backupPath & " " & quoted form of targetPath & "; exit 1; fi"
+do shell script commandText with administrator privileges
+APPLESCRIPT
+fi
+/usr/bin/open "$TARGET"
+sleep 2
+/bin/rm -rf "$WORK"
+"#,
+    )
+    .map_err(|error| format!("无法创建 macOS 更新辅助脚本：{error}"))?;
+    let mut permissions = fs::metadata(&script)
+        .map_err(|error| format!("无法读取更新脚本权限：{error}"))?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&script, permissions)
+        .map_err(|error| format!("无法设置更新脚本权限：{error}"))?;
+    std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .arg(std::process::id().to_string())
+        .arg(installer)
+        .arg(target)
+        .arg(work)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("无法启动 macOS 更新安装程序：{error}"))?;
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn launch_update_helper(
+    _app: &tauri::AppHandle,
+    _installer: &Path,
+    _work: &Path,
+) -> Result<(), String> {
+    Err("当前平台暂不支持一键更新".into())
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    let expected = release_version(&version)?;
+    let release = latest_release().await?;
+    if release_version(&release.tag_name)? != expected
+        || expected <= release_version(CLIENT_VERSION)?
+    {
+        return Err("更新版本已变化，请重新检查更新".into());
+    }
+    let asset =
+        update_asset(&release).ok_or_else(|| "此版本没有适用于当前系统的安装包".to_string())?;
+    let work = update_temp_dir(&version)?;
+    let installer = work.join(&asset.name);
+    if let Err(error) = download_update_asset(asset, &installer).await {
+        let _ = fs::remove_dir_all(&work);
+        return Err(error);
+    }
+    launch_update_helper(&app, &installer, &work)
 }
 
 fn main() {
@@ -2223,6 +2727,10 @@ fn main() {
             validate_workspace,
             pick_workspace,
             list_workspace_files,
+            git_summary,
+            git_checkout,
+            git_commit,
+            git_push,
             read_preview_file,
             start_file_preview,
             acp_read_text_file,
@@ -2241,6 +2749,7 @@ fn main() {
             grok_runtime_info,
             install_official_grok_cli,
             check_for_update,
+            install_update,
             open_external,
             start_project_preview,
             acp_spawn,
@@ -2433,6 +2942,30 @@ mod tests {
     }
 
     #[test]
+    fn selects_installers_for_every_release_target() {
+        assert!(update_asset_matches(
+            "Grox_0.2.1_x64-setup.exe",
+            "windows",
+            "x86_64"
+        ));
+        assert!(update_asset_matches(
+            "Grox_0.2.1_aarch64.dmg",
+            "macos",
+            "aarch64"
+        ));
+        assert!(update_asset_matches(
+            "Grox_0.2.1_x64.dmg",
+            "macos",
+            "x86_64"
+        ));
+        assert!(!update_asset_matches(
+            "Grox_0.2.1_x64_en-US.msi",
+            "windows",
+            "x86_64"
+        ));
+    }
+
+    #[test]
     fn cli_version_number_extracts_semver_from_version_output() {
         assert_eq!(
             cli_version_number("grok 0.2.106 (abc1234) [stable]"),
@@ -2445,5 +2978,4 @@ mod tests {
         assert_eq!(cli_version_number("grok"), None);
         assert_eq!(cli_version_number(""), None);
     }
-
 }

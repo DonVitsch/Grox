@@ -46,7 +46,7 @@ export function RewindMenu({
 }: {
   onComplete?(): void;
   targetPromptIndex?: number;
-  variant?: "toolbar" | "request";
+  variant?: "toolbar" | "request" | "changes";
 }) {
   const { language } = useI18n();
   const activeId = useDesktop((state) => state.activeId);
@@ -103,8 +103,25 @@ export function RewindMenu({
         const selected = next.find((item) => item.prompt_index === targetPromptIndex);
         if (selected) {
           setPoint(selected);
-          setMode("conversation_only");
-          setStage("mode");
+          if (variant === "changes") {
+            if (!selected.has_file_changes) {
+              setStage("points");
+              setError(language === "zh-CN" ? "这一轮没有可撤销的文件快照" : "This turn has no file snapshot to undo");
+            } else {
+              setMode("files_only");
+              setStage("previewing");
+              try {
+                setPreview(await previewRewind(selected.prompt_index, "files_only"));
+                setStage("confirm");
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : String(cause));
+                setStage("points");
+              }
+            }
+          } else {
+            setMode("conversation_only");
+            setStage("mode");
+          }
         } else {
           setStage("points");
           setError(language === "zh-CN" ? "没有找到这条请求对应的官方回退节点" : "No official rewind checkpoint was found for this request");
@@ -156,27 +173,28 @@ export function RewindMenu({
 
   const totalRemoved = point ? points.filter((item) => item.prompt_index >= point.prompt_index).length : 0;
   const labels = modeLabels[mode];
+  const modal = variant === "request" || variant === "changes";
 
   return (
     <div ref={rootRef} className="relative">
       <button
         onClick={() => open ? close() : void showPoints()}
-        className={`flex h-7 items-center justify-center gap-1.5 rounded-[5px] border transition-colors ${variant === "request" ? "border-transparent px-1.5 text-[9px] text-acc hover:text-fg" : "border-line2 bg-high/45 px-2 text-[9.5px] font-medium text-mute hover:border-gold/35 hover:bg-high hover:text-gold"} ${open ? "border-gold/35 bg-high text-gold" : ""}`}
-        title={language === "zh-CN" ? "选择历史节点回退并编辑" : "Choose a checkpoint to rewind and edit"}
+        className={`flex h-7 items-center justify-center gap-1.5 rounded-[5px] border transition-colors ${variant === "request" ? "border-transparent px-1.5 text-[9px] text-acc hover:text-fg" : variant === "changes" ? "border-transparent px-2 text-[10.5px] text-fg2 hover:bg-high hover:text-fg" : "border-line2 bg-high/45 px-2 text-[9.5px] font-medium text-mute hover:border-gold/35 hover:bg-high hover:text-gold"} ${open ? "border-gold/35 bg-high text-gold" : ""}`}
+        title={variant === "changes" ? (language === "zh-CN" ? "撤销本轮文件修改" : "Undo file changes from this turn") : (language === "zh-CN" ? "选择历史节点回退并编辑" : "Choose a checkpoint to rewind and edit")}
         aria-haspopup="dialog"
         aria-expanded={open}
       >
         <Icon name="refresh" size={11} />
-        <span>{variant === "request" ? (language === "zh-CN" ? "撤回编辑" : "REWIND & EDIT") : (language === "zh-CN" ? "历史回退" : "HISTORY")}</span>
+        <span>{variant === "request" ? (language === "zh-CN" ? "撤回编辑" : "REWIND & EDIT") : variant === "changes" ? (language === "zh-CN" ? "撤销" : "UNDO") : (language === "zh-CN" ? "历史回退" : "HISTORY")}</span>
       </button>
 
       {open && (
-        <RewindSurface modal={variant === "request"} onClose={close}>
+        <RewindSurface modal={modal} onClose={close}>
           <div
             ref={dialogRef}
             role="dialog"
             aria-label={language === "zh-CN" ? "对话回退" : "Rewind conversation"}
-            className={`${variant === "request" ? "relative" : "absolute bottom-full right-0 mb-2"} z-50 flex max-h-[min(460px,calc(100vh-120px))] w-[min(520px,calc(100vw-32px))] flex-col overflow-hidden rounded-[8px] border border-line2 bg-raise shadow-[0_14px_44px_rgba(0,0,0,0.62)] animate-fade-up`}
+            className={`${modal ? "relative" : "absolute bottom-full right-0 mb-2"} z-50 flex max-h-[min(460px,calc(100vh-120px))] w-[min(520px,calc(100vw-32px))] flex-col overflow-hidden rounded-[8px] border border-line2 bg-raise shadow-[0_14px_44px_rgba(0,0,0,0.62)] animate-fade-up`}
           >
           <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
             {busy ? <BlackHole size={13} spin /> : <Icon name="branch" size={12} className="text-gold" />}
@@ -230,7 +248,11 @@ export function RewindMenu({
               <div className="p-1">
                 <SelectedPoint point={point} language={language} />
                 <div className="mt-2 rounded-[5px] border border-gold/25 bg-gold/5 p-2.5">
-                  <p className="text-[11px] text-fg2">{language === "zh-CN" ? `将从第 ${point.prompt_index + 1} 轮开始移除 ${totalRemoved} 轮对话` : `${totalRemoved} turn(s) from turn ${point.prompt_index + 1} will be removed`}</p>
+                  <p className="text-[11px] text-fg2">
+                    {mode === "files_only"
+                      ? (language === "zh-CN" ? `将撤销第 ${point.prompt_index + 1} 轮产生的文件修改` : `File changes from turn ${point.prompt_index + 1} will be reverted`)
+                      : (language === "zh-CN" ? `将从第 ${point.prompt_index + 1} 轮开始移除 ${totalRemoved} 轮对话` : `${totalRemoved} turn(s) from turn ${point.prompt_index + 1} will be removed`)}
+                  </p>
                   <p className="mt-1 text-[9.5px] text-mute">{mode === "files_only" ? (language === "zh-CN" ? `${labels.zh} · 对话保持不变` : `${labels.en} · the conversation remains unchanged`) : (language === "zh-CN" ? `${labels.zh} · 回退后会把所选请求放回输入框供你编辑` : `${labels.en} · the selected request returns to the composer for editing`)}</p>
                 </div>
                 {(preview.clean_files.length > 0 || preview.conflicts.length > 0) && (

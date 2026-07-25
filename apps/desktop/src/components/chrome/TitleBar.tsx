@@ -7,6 +7,7 @@ import { useDesktop } from "../../state/store";
 import { baseName } from "../../lib/format";
 import { Icon } from "../fx/Icon";
 import { useI18n } from "../../lib/i18n";
+import { EnvironmentSummary } from "./EnvironmentSummary";
 
 const inTauri = () => "__TAURI_INTERNALS__" in window;
 const isWindows = () => navigator.userAgent.includes("Windows");
@@ -27,12 +28,14 @@ export function TitleBar() {
   const bridgeKind = useDesktop((s) => s.bridgeKind);
   const toggleInspector = useDesktop((s) => s.toggleInspector);
   const inspectorOpen = useDesktop((s) => s.inspectorOpen);
+  const toggleTerminal = useDesktop((s) => s.toggleTerminal);
+  const terminalOpen = useDesktop((s) => s.terminalOpen);
   const setPaletteOpen = useDesktop((s) => s.setPaletteOpen);
 
   return (
     <header
       data-tauri-drag-region
-      className="relative flex h-10 shrink-0 items-center overflow-hidden border-b border-line bg-void pl-[78px] pr-2 select-none"
+      className="relative z-40 flex h-10 shrink-0 items-center border-b border-line bg-void pl-[78px] pr-2 select-none"
     >
       {/* center — mission breadcrumb */}
       <div
@@ -74,10 +77,22 @@ export function TitleBar() {
           <span>⌘K</span>
         </button>
 
+        <EnvironmentSummary />
+
+        <button
+          className={`chip ${terminalOpen ? "!text-fg2 !border-line3" : ""}`}
+          onClick={toggleTerminal}
+          title={language === "zh-CN" ? "显示/隐藏终端" : "Toggle terminal"}
+          aria-pressed={terminalOpen}
+        >
+          <Icon name="terminal" size={12} />
+        </button>
+
         <button
           className={`chip ${inspectorOpen ? "!text-fg2 !border-line3" : ""}`}
           onClick={toggleInspector}
           title={language === "zh-CN" ? "显示/隐藏检查器" : "Toggle inspector"}
+          aria-pressed={inspectorOpen}
         >
           <Icon name="panelRight" size={12} />
         </button>

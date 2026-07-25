@@ -19,6 +19,7 @@ import { usePreferences } from "./state/preferences";
 import { useI18n } from "./lib/i18n";
 import { AccountSetup } from "./components/settings/AccountSetup";
 import { UpdateNotice } from "./components/update/UpdateNotice";
+import { TerminalPanel } from "./components/terminal/TerminalPanel";
 
 export default function App() {
   const { language } = useI18n();
@@ -28,6 +29,7 @@ export default function App() {
   const activeId = useDesktop((s) => s.activeId);
   const session = useDesktop((s) => (s.activeId ? s.sessions[s.activeId] : null));
   const inspectorOpen = useDesktop((s) => s.inspectorOpen);
+  const terminalOpen = useDesktop((s) => s.terminalOpen);
   const previewOpen = useDesktop((s) => s.previewOpen);
   const planPreviewOpen = useDesktop((s) => s.planPreviewOpen);
   const sidebarWidth = usePreferences((s) => s.sidebarWidth);
@@ -79,21 +81,24 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <ResizeHandle side="right" value={sidebarWidth} onChange={setSidebarWidth} />
-        <main className="flex min-w-0 flex-1 flex-col bg-base">
-          {inSession && session ? (
-            <>
-              <Timeline session={session} />
-              <Composer />
-            </>
-          ) : inSession && !session ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3">
-              <BlackHole size={28} spin />
-              <span className="lbl !text-[10px]">{language === "zh-CN" ? "正在恢复任务" : "RESTORING MISSION"}</span>
-            </div>
-          ) : (
-            <Home />
-          )}
-        </main>
+        <div className="flex min-w-0 flex-1 flex-col bg-base">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {inSession && session ? (
+              <>
+                <Timeline session={session} />
+                <Composer />
+              </>
+            ) : inSession && !session ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3">
+                <BlackHole size={28} spin />
+                <span className="lbl !text-[10px]">{language === "zh-CN" ? "正在恢复任务" : "RESTORING MISSION"}</span>
+              </div>
+            ) : (
+              <Home />
+            )}
+          </main>
+          {terminalOpen && <TerminalPanel />}
+        </div>
         {inspectorOpen && !planPreviewOpen && inSession && session && <Inspector />}
         {previewOpen && <PreviewPane />}
         {planPreviewOpen && inSession && session && <PlanPreviewPane />}

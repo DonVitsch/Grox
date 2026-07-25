@@ -36,13 +36,13 @@ jobs:
           $title = "[Upstream] 官方 Grok Build 已更新"
           $compare = "https://github.com/xai-org/grok-build/compare/$($baseline.commit)...$($latest.sha)"
           $body = @"
-          检测到官方 `xai-org/grok-build` 已超过 Grox 当前适配基线。
+          检测到官方 xai-org/grok-build 已超过 Grox 当前适配基线。
 
-          - 已审查：`$($baseline.commit)`（CLI $($baseline.version)）
-          - 最新：`$($latest.sha)`
+          - 已审查：$($baseline.commit)（CLI $($baseline.version)）
+          - 最新：$($latest.sha)
           - 差异：$compare
 
-          适配后请检查 ACP 初始化能力、会话更新/导入、思考与工具事件、权限与模式、模型配置、认证/安装脚本及历史数据兼容性；最后更新 `.grox/official-cli.json`。Grox 不复制或重新发布官方 CLI。
+          适配后请检查 ACP 初始化能力、会话更新/导入、思考与工具事件、权限与模式、模型配置、认证/安装脚本及历史数据兼容性；最后更新 .grox/official-cli.json。Grox 不复制或重新发布官方 CLI。
           "@
           $existing = gh issue list --state open --search "`"$title`" in:title" --json number,title --jq ".[] | select(.title == `"$title`") | .number" | Select-Object -First 1
           if ($existing) {

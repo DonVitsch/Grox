@@ -361,6 +361,8 @@ function mapToolKind(kindValue: unknown, titleValue: unknown): ToolKind {
   if (TOOL_KINDS.has(exact as ToolKind)) return exact as ToolKind;
   if (exact === "fetch") return "web_fetch";
   const source = `${exact} ${string(titleValue) ?? ""}`.toLowerCase();
+  if (/\bgoal\b/.test(source)) return "goal_update";
+  if (/\bworkflow\b/.test(source)) return "task";
   if (/\b(read|view|cat)\b/.test(source)) return "read";
   if (/\b(delete|remove|unlink)\b/.test(source)) return "delete";
   if (/\b(move|rename)\b/.test(source)) return "move";
@@ -534,6 +536,29 @@ function mapPlanSteps(value: unknown): PlanStep[] {
   });
 }
 
+function mapAvailableCommands(value: unknown): SlashCommand[] {
+  return array(value).flatMap((entry) => {
+    const command = record(entry);
+    const name = string(command?.name)?.replace(/^\//, "");
+    if (!command || !name) return [];
+    const inputHint = string(record(command.input)?.hint);
+    return [{
+      name,
+      description: string(command.description) ?? "Grok Runtime command",
+      ...(inputHint ? { inputHint } : {}),
+    }];
+  });
+}
+
+function combinedDisplayTexts(value: unknown): string[] | undefined {
+  const content = record(value);
+  const meta = record(content?._meta);
+  const segments = array(meta?.combinedDisplayTexts)
+    .map((entry) => string(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return segments.length >= 2 ? segments : undefined;
+}
+
 function applyToSession(session: Session, event: BridgeEvent): Session {
   if ("sessionId" in event && event.sessionId !== session.id) return session;
   const patchBlock = (blockId: string, patch: Partial<SessionBlock>) =>
@@ -661,6 +686,7 @@ export class AcpBridge implements GrokBridge {
   private authMethodId: string | undefined;
   private authState: AuthState = { required: false, inProgress: false };
   private modelState: ModelState = { models: MODELS, currentId: MODELS[0].id };
+  private runtimeCommands: SlashCommand[] = [];
   private permissionMode: PermissionMode =
     localStorage.getItem("grok.permissionMode") === "auto"
       ? "auto"
@@ -802,6 +828,7 @@ export class AcpBridge implements GrokBridge {
       },
     }, 15_000);
     this.captureModelState(response);
+    this.captureRuntimeCommands(response);
     await this.configureAuthentication(response);
   }
 
@@ -832,6 +859,7 @@ export class AcpBridge implements GrokBridge {
     this.knownSessions.clear();
     this.authMethodId = undefined;
     this.modelState = { models: MODELS, currentId: MODELS[0].id };
+    this.runtimeCommands = [];
     const next = this.initializeAgent();
     this.ready = next;
     await next;
@@ -1069,6 +1097,26 @@ export class AcpBridge implements GrokBridge {
     switch (type) {
       case "user_message_chunk": {
         if (!this.replaying.has(sessionId)) return;
+        const combined = combinedDisplayTexts(update.content);
+        if (combined) {
+          for (const text of combined) {
+            const blockId = uid();
+            cursor.userId = blockId;
+            cursor.userText = text;
+            this.emit({
+              type: "block_add",
+              sessionId,
+              block: { type: "user", id: blockId, text, ts: Date.now() },
+            });
+          }
+          cursor.userOpen = true;
+          const promptIndex = number(record(update._meta)?.promptIndex);
+          if (promptIndex !== undefined) cursor.userPromptIndex = promptIndex;
+          cursor.assistantId = undefined;
+          cursor.thinkingId = undefined;
+          cursor.thinkingStartedAt = undefined;
+          return;
+        }
         const delta = contentText(update.content);
         const promptIndex = number(record(update._meta)?.promptIndex);
         const userId = cursor.userId;
@@ -1153,19 +1201,10 @@ export class AcpBridge implements GrokBridge {
         return;
       }
       case "available_commands_update": {
-        const commands: SlashCommand[] = [];
-        for (const value of array(update.availableCommands ?? update.available_commands)) {
-          const command = record(value);
-          const name = string(command?.name)?.replace(/^\//, "");
-          if (!command || !name) continue;
-          const inputHint = string(record(command.input)?.hint);
-          commands.push({
-            name,
-            description: string(command.description) ?? "Grok Runtime command",
-            ...(inputHint ? { inputHint } : {}),
-          });
-        }
-        this.emit({ type: "available_commands", sessionId, commands });
+        this.runtimeCommands = mapAvailableCommands(
+          update.availableCommands ?? update.available_commands,
+        );
+        this.emit({ type: "available_commands", sessionId, commands: this.runtimeCommands });
         return;
       }
       case "tool_call":
@@ -1615,6 +1654,15 @@ export class AcpBridge implements GrokBridge {
     this.emit({ type: "model_state", state: this.modelState });
   }
 
+  private captureRuntimeCommands(responseValue: unknown) {
+    const response = record(responseValue);
+    const meta = record(response?._meta);
+    const commands = mapAvailableCommands(
+      meta?.availableCommands ?? meta?.available_commands ?? response?.availableCommands,
+    );
+    if (commands.length > 0) this.runtimeCommands = commands;
+  }
+
   private metaFromRow(rowValue: unknown, fallbackCwd = this.workspace): SessionMeta | undefined {
     const row = record(rowValue);
     const id = string(row?.sessionId);
@@ -1881,6 +1929,7 @@ export class AcpBridge implements GrokBridge {
     const sessionId = string(response?.sessionId);
     if (!sessionId) throw new Error("session/new 未返回 sessionId");
     this.captureModelState(response);
+    this.captureRuntimeCommands(response);
     const detail = record(record(response?._meta)?.["x.ai/sessionDetail"]);
     const now = Date.now();
     const meta: SessionMeta = {
@@ -1897,6 +1946,7 @@ export class AcpBridge implements GrokBridge {
     this.cursors.set(sessionId, { toolBlocks: new Map() });
     this.usage.set(sessionId, { ...EMPTY_USAGE });
     this.emit({ type: "session_ready", session: emptySession(meta) });
+    this.emit({ type: "available_commands", sessionId, commands: this.runtimeCommands });
   }
 
   async loadSession(id: string): Promise<void> {
@@ -1921,6 +1971,7 @@ export class AcpBridge implements GrokBridge {
       this.flushStreamAppends(id);
       this.flushToolPatches(id);
       this.captureModelState(response);
+      this.captureRuntimeCommands(response);
       await this.refreshSessionInfo(id);
       const replayed = this.replaying.get(id) ?? emptySession(meta);
       const finalized: Session = {
@@ -1938,6 +1989,7 @@ export class AcpBridge implements GrokBridge {
       this.replaying.delete(id);
       this.knownSessions.add(id);
       this.emit({ type: "session_ready", session: finalized });
+      this.emit({ type: "available_commands", sessionId: id, commands: this.runtimeCommands });
     } catch (error) {
       this.replaying.delete(id);
       throw error;
