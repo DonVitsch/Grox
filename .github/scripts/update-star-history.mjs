@@ -70,9 +70,12 @@ function chart(theme) {
   const grid = dark ? "#30363d" : "#d8dee4";
   const accent = "#f05a28";
   const fill = dark ? "#f05a2838" : "#f05a2826";
-  const date = new Intl.DateTimeFormat("zh-CN", end - start > 366 * 86_400_000
-    ? { year: "2-digit", month: "2-digit" }
-    : { month: "2-digit", day: "2-digit" });
+  const date = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "UTC",
+    ...(end - start > 366 * 86_400_000
+      ? { year: "2-digit", month: "2-digit" }
+      : { month: "2-digit", day: "2-digit" }),
+  });
   const xTicks = Array.from({ length: 5 }, (_, index) => start + ((end - start) * index) / 4);
   const yTicks = Array.from({ length: 5 }, (_, index) => (maxStars * index) / 4);
 
