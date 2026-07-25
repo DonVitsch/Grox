@@ -105,10 +105,12 @@ Grox 持续追踪 `xai-org/grok-build` 的官方发布、ACP 协议和功能变�
 
 ## Star History
 
-<a href="https://www.star-history.com/#dandandujie/Grox&Date">
+<a href="https://github.com/dandandujie/Grox/stargazers">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date" />
-    <img alt="Grox Star History Chart" src="https://api.star-history.com/svg?repos=dandandujie/Grox&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/dandandujie/Grox/main/.github/assets/star-history-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/dandandujie/Grox/main/.github/assets/star-history.svg" />
+    <img alt="Grox Star History Chart" src="https://raw.githubusercontent.com/dandandujie/Grox/main/.github/assets/star-history.svg" />
   </picture>
 </a>
+
+曲线由 GitHub Actions 每小时通过 Stargazers API 自动刷新，访问凭据仅保存在仓库 Secret 中。
