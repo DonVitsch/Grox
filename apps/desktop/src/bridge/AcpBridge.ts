@@ -351,7 +351,7 @@ const TOOL_KINDS = new Set<ToolKind>([
   "read", "edit", "delete", "list_dir", "write", "move", "search", "lsp", "execute",
   "plan", "web_search", "web_fetch", "background_task_action", "wait_tasks_action",
   "kill_task_action", "list", "skill", "memory_search", "memory_get", "task", "enter_plan",
-  "exit_plan", "ask_user", "image_gen", "video_gen", "image_to_video", "reference_to_video",
+  "exit_plan", "ask_user", "image_gen", "video_gen", "image_to_video", "reference_to_video", "computer",
   "deploy_app", "search_tool", "use_tool", "monitor", "goal_update", "terminal", "web",
   "think", "switch_mode", "other",
 ]);
@@ -361,6 +361,7 @@ function mapToolKind(kindValue: unknown, titleValue: unknown): ToolKind {
   if (TOOL_KINDS.has(exact as ToolKind)) return exact as ToolKind;
   if (exact === "fetch") return "web_fetch";
   const source = `${exact} ${string(titleValue) ?? ""}`.toLowerCase();
+  if (/\b(computer_(screenshot|mouse|click|drag|scroll|key|type|wait)|list_(apps|windows)|get_window_state|activate_window|double_click|press_key|set_value)\b/.test(source)) return "computer";
   if (/\bgoal\b/.test(source)) return "goal_update";
   if (/\bworkflow\b/.test(source)) return "task";
   if (/\b(read|view|cat)\b/.test(source)) return "read";
@@ -534,6 +535,11 @@ function mapPlanSteps(value: unknown): PlanStep[] {
       status,
     };
   });
+}
+
+interface ComputerSessionExtensions {
+  mcpServers: unknown[];
+  pluginDirs: string[];
 }
 
 function mapAvailableCommands(value: unknown): SlashCommand[] {
@@ -1920,10 +1926,11 @@ export class AcpBridge implements GrokBridge {
 
   async newSession(cwd: string): Promise<void> {
     const metaRequest = await this.sessionMeta(cwd);
+    const computer = await invoke<ComputerSessionExtensions>("computer_session_extensions");
     const responseValue = await this.request(ACP_METHODS.sessionNew, {
       cwd,
-      mcpServers: [],
-      _meta: metaRequest,
+      mcpServers: computer.mcpServers,
+      _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
     });
     const response = record(responseValue);
     const sessionId = string(response?.sessionId);
@@ -1962,11 +1969,12 @@ export class AcpBridge implements GrokBridge {
     this.replaying.set(id, emptySession(meta));
     try {
       const metaRequest = await this.sessionMeta(meta.cwd);
+      const computer = await invoke<ComputerSessionExtensions>("computer_session_extensions");
       const response = await this.request(ACP_METHODS.sessionLoad, {
         sessionId: id,
         cwd: meta.cwd,
-        mcpServers: [],
-        _meta: metaRequest,
+        mcpServers: computer.mcpServers,
+        _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
       }, 2 * 60_000);
       this.flushStreamAppends(id);
       this.flushToolPatches(id);

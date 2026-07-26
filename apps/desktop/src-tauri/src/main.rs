@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod computer_mcp;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -148,6 +150,41 @@ struct GrokRuntimeInfo {
     selection_required: bool,
     version: Option<String>,
     grox_commit: &'static str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaGenerationRequest {
+    kind: String,
+    prompt: String,
+    aspect: String,
+    count: u8,
+    duration: u16,
+    resolution: String,
+    reference_path: Option<String>,
+    cwd: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaArtifact {
+    path: Option<String>,
+    url: Option<String>,
+    mime: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaGenerationResult {
+    artifacts: Vec<MediaArtifact>,
+    summary: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerSessionExtensions {
+    mcp_servers: Vec<serde_json::Value>,
+    plugin_dirs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -2168,6 +2205,269 @@ fn open_external(url: String) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_computer_plugin() -> Result<PathBuf, String> {
+    let root = grok_home()?.join("plugins").join("grox-computer-use");
+    let skill = root.join("skills").join("computer");
+    fs::create_dir_all(&skill).map_err(|error| format!("无法创建 Computer Use Skill：{error}"))?;
+    fs::write(
+        root.join("plugin.json"),
+        r#"{"name":"grox-desktop-computer-use","version":"0.1.0","description":"Grox Windows foreground Computer Use harness"}"#,
+    )
+    .map_err(|error| format!("无法写入 Computer Use Plugin：{error}"))?;
+    fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name: computer
+description: Use Grox's experimental Windows foreground Computer Use harness only when the user explicitly asks for visual desktop control or uses @Computer.
+---
+
+# Grox Computer Use
+
+Use only the grok_desktop_computer MCP tools for an explicit `/computer` or `@Computer` request. Start with `list_apps`/`list_windows`, select an exact window with `start`, then repeat `get_window_state` → one action → `get_window_state`. Every state-changing action must use the latest `stateId`; stale state must be rejected. Prefer UI Automation `elementId`/`set_value` when available. Never control Grox, terminals, UAC, Windows Security, elevated windows, or the secure desktop. Use `stop` immediately when the user asks.
+"#,
+    )
+    .map_err(|error| format!("无法写入 Computer Use Skill：{error}"))?;
+    Ok(root)
+}
+
+#[tauri::command]
+fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
+    let plugin = ensure_computer_plugin()?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("无法定位 Grox computer use 执行器：{error}"))?;
+    Ok(ComputerSessionExtensions {
+        mcp_servers: vec![serde_json::json!({
+            "type": "stdio",
+            "name": "grok_desktop_computer",
+            "command": executable,
+            "args": ["--computer-mcp"]
+        })],
+        plugin_dirs: vec![path_for_webview(&plugin)],
+    })
+}
+
+#[tauri::command]
+fn save_media_reference(cwd: String, name: String, data: String) -> Result<String, String> {
+    let cwd = checked_workspace(&cwd)?;
+    let extension = Path::new(&name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or("参考图片缺少扩展名")?;
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        return Err("参考图片仅支持 PNG、JPEG 或 WebP".into());
+    }
+    if data.len() > 32 * 1024 * 1024 {
+        return Err("参考图片不能超过 24 MB".into());
+    }
+    let payload = data
+        .rsplit_once(',')
+        .map(|(_, value)| value)
+        .unwrap_or(&data);
+    let bytes = BASE64
+        .decode(payload)
+        .map_err(|error| format!("参考图片编码无效：{error}"))?;
+    let directory = cwd.join(".grox").join("media-input");
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建媒体输入目录：{error}"))?;
+    let path = directory.join(format!(
+        "reference-{}-{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        extension
+    ));
+    fs::write(&path, bytes).map_err(|error| format!("无法保存参考图片：{error}"))?;
+    Ok(path_for_webview(&path))
+}
+
+#[tauri::command]
+async fn generate_media(
+    app: tauri::AppHandle,
+    request: MediaGenerationRequest,
+) -> Result<MediaGenerationResult, String> {
+    let cwd = checked_workspace(&request.cwd)?;
+    let prompt = checked_media_prompt(&request)?;
+    let runtime = configured_grok_command(&app);
+    let mut command = Command::new(&runtime.path);
+    command
+        .arg("--single")
+        .arg(&prompt)
+        .args(["--output-format", "streaming-json", "--always-approve"])
+        .args([
+            "--tools",
+            "image_gen,video_gen,image_to_video,reference_to_video",
+        ])
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Ok(home) = grok_home() {
+        for (key, value) in parse_env_file(&home.join(".env")) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in GROX_PRIVACY_ENV {
+        command.env(key, value);
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(600), command.output())
+        .await
+        .map_err(|_| "媒体生成超过 10 分钟，任务已终止".to_string())?
+        .map_err(|error| format!("无法启动 Grok Build 媒体生成：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            stdout.as_ref()
+        } else {
+            stderr.as_ref()
+        };
+        return Err(format!(
+            "Grok Build 媒体生成失败：{}",
+            detail.trim().chars().take(4_000).collect::<String>()
+        ));
+    }
+    let artifacts = extract_media_artifacts(&stdout, &cwd)?;
+    if artifacts.is_empty() {
+        return Err(format!(
+            "Grok Build 已结束，但未返回媒体产物：{}",
+            stdout
+                .trim()
+                .chars()
+                .rev()
+                .take(2_000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        ));
+    }
+    for artifact in &artifacts {
+        if let Some(path) = artifact.path.as_deref() {
+            app.asset_protocol_scope()
+                .allow_file(PathBuf::from(path))
+                .map_err(|error| format!("无法授权媒体预览：{error}"))?;
+        }
+    }
+    Ok(MediaGenerationResult {
+        artifacts,
+        summary: format!("Grok Build 已生成 {} 个媒体产物", request.count),
+    })
+}
+
+fn checked_media_prompt(request: &MediaGenerationRequest) -> Result<String, String> {
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() || prompt.chars().count() > 4_000 {
+        return Err("媒体提示词必须为 1–4000 个字符".into());
+    }
+    let aspect = match request.aspect.as_str() {
+        "1:1" | "16:9" | "9:16" | "4:3" => request.aspect.as_str(),
+        _ => return Err("不支持的画面比例".into()),
+    };
+    let instruction = match request.kind.as_str() {
+        "image" => format!(
+            "必须调用内置 image_gen 工具真实生成 {count} 张图片。画面比例 {aspect}。生成完成后仅列出每个实际输出文件的绝对路径或 URL。用户提示：{prompt}",
+            count = request.count.clamp(1, 4)
+        ),
+        "video" => {
+            let reference = request.reference_path.as_deref()
+                .map(|path| format!("参考图片绝对路径：{path}。必须使用 image_to_video 或 reference_to_video。"))
+                .unwrap_or_else(|| "必须使用 video_gen。".to_string());
+            format!(
+                "{reference}真实生成视频，画面比例 {aspect}，时长 {duration} 秒，分辨率 {resolution}。生成完成后仅列出实际输出文件的绝对路径或 URL。用户提示：{prompt}",
+                duration = request.duration.clamp(1, 30),
+                resolution = request.resolution
+            )
+        }
+        _ => return Err("不支持的媒体类型".into()),
+    };
+    Ok(instruction)
+}
+
+fn extract_media_artifacts(output: &str, cwd: &Path) -> Result<Vec<MediaArtifact>, String> {
+    let mut candidates = Vec::new();
+    for line in output.lines() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            collect_media_strings(&value, &mut candidates);
+        } else {
+            candidates.extend(line.split_whitespace().map(|value| {
+                value
+                    .trim_matches(|c| matches!(c, '"' | '\'' | ',' | ')' | '('))
+                    .to_string()
+            }));
+        }
+    }
+    let mut artifacts = Vec::new();
+    for candidate in candidates {
+        let clean = candidate.trim().trim_matches('"');
+        let lower = clean.to_ascii_lowercase();
+        let mime = if lower.contains(".png") {
+            "image/png"
+        } else if lower.contains(".jpg") || lower.contains(".jpeg") {
+            "image/jpeg"
+        } else if lower.contains(".webp") {
+            "image/webp"
+        } else if lower.contains(".mp4") {
+            "video/mp4"
+        } else if lower.contains(".webm") {
+            "video/webm"
+        } else {
+            continue;
+        };
+        if clean.starts_with("https://")
+            || clean.starts_with("http://localhost")
+            || clean.starts_with("http://127.0.0.1")
+        {
+            artifacts.push(MediaArtifact {
+                path: None,
+                url: Some(clean.to_string()),
+                mime: mime.into(),
+            });
+            continue;
+        }
+        let path = PathBuf::from(clean);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        if path.is_file() {
+            let display = path_for_webview(&path);
+            if !artifacts
+                .iter()
+                .any(|item| item.path.as_deref() == Some(&display))
+            {
+                artifacts.push(MediaArtifact {
+                    path: Some(display),
+                    url: None,
+                    mime: mime.into(),
+                });
+            }
+        }
+    }
+    Ok(artifacts)
+}
+
+fn collect_media_strings(value: &serde_json::Value, output: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(value) => output.push(value.clone()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .for_each(|value| collect_media_strings(value, output)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .for_each(|value| collect_media_strings(value, output)),
+        _ => {}
+    }
+}
+
 /// Start a fresh ACP child and stream each stdout JSON-RPC line to the webview.
 /// A repeated call intentionally replaces the old child so a webview reload
 /// cannot initialize the same agent process twice.
@@ -2190,10 +2490,15 @@ async fn acp_spawn(
     }
 
     let runtime = configured_grok_command(&app);
+    let computer_plugin = ensure_computer_plugin()
+        .map_err(|error| format!("Computer Use Plugin 初始化失败：{error}"))?;
     let command_path = PathBuf::from(&runtime.path);
     let mut command = Command::new(&command_path);
     command
-        .args(["agent", "stdio"])
+        .arg("agent")
+        .arg("--plugin-dir")
+        .arg(&computer_plugin)
+        .arg("stdio")
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2711,6 +3016,13 @@ async fn install_update(app: tauri::AppHandle, version: String) -> Result<(), St
 }
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--computer-mcp") {
+        if let Err(error) = computer_mcp::run() {
+            eprintln!("grox-computer-mcp: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
         .manage(Arc::new(AcpState::default()))
         .manage(Arc::new(PreviewState::default()))
@@ -2752,6 +3064,9 @@ fn main() {
             install_update,
             open_external,
             start_project_preview,
+            computer_session_extensions,
+            save_media_reference,
+            generate_media,
             acp_spawn,
             acp_send,
             acp_kill,
@@ -2977,5 +3292,51 @@ mod tests {
         );
         assert_eq!(cli_version_number("grok"), None);
         assert_eq!(cli_version_number(""), None);
+    }
+
+    #[test]
+    fn media_prompt_selects_native_grok_tools() {
+        let image = MediaGenerationRequest {
+            kind: "image".into(),
+            prompt: "黑洞边缘的空间站".into(),
+            aspect: "16:9".into(),
+            count: 2,
+            duration: 5,
+            resolution: "1080p".into(),
+            reference_path: None,
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
+        };
+        let prompt = checked_media_prompt(&image).unwrap();
+        assert!(prompt.contains("image_gen"));
+        assert!(prompt.contains("2 张"));
+
+        let video = MediaGenerationRequest {
+            kind: "video".into(),
+            reference_path: Some("D:/input.png".into()),
+            ..image
+        };
+        let prompt = checked_media_prompt(&video).unwrap();
+        assert!(prompt.contains("image_to_video"));
+        assert!(prompt.contains("1080p"));
+    }
+
+    #[test]
+    fn media_artifacts_are_limited_to_existing_files_or_safe_urls() {
+        let root = std::env::temp_dir().join(format!(
+            "grox-media-test-{}",
+            CONFIG_WRITE_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let image = root.join("result.png");
+        fs::write(&image, b"png").unwrap();
+        let output = format!(
+            "{{\"path\":{}}}\n{{\"url\":\"https://example.com/result.mp4\"}}",
+            serde_json::to_string(&path_for_webview(&image)).unwrap()
+        );
+        let artifacts = extract_media_artifacts(&output, &root).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].mime, "image/png");
+        assert_eq!(artifacts[1].mime, "video/mp4");
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -9,7 +9,7 @@ import { useI18n } from "../../lib/i18n";
 import { Icon } from "../fx/Icon";
 import { Wordmark } from "../fx/Wordmark";
 
-type Section = "general" | "account" | "appearance" | "mcp" | "skills" | "plugins";
+type Section = "general" | "account" | "appearance" | "mcp" | "skills" | "plugins" | "hooks";
 type Json = Record<string, unknown>;
 
 const object = (value: unknown): Json =>
@@ -27,7 +27,7 @@ export function SettingsModal() {
   useEffect(() => {
     const openSection = (event: Event) => {
       const next = (event as CustomEvent<Section>).detail;
-      if (["general", "account", "appearance", "mcp", "skills", "plugins"].includes(next)) setSection(next);
+      if (["general", "account", "appearance", "mcp", "skills", "plugins", "hooks"].includes(next)) setSection(next);
     };
     window.addEventListener("grox:settings-section", openSection);
     return () => window.removeEventListener("grox:settings-section", openSection);
@@ -41,6 +41,7 @@ export function SettingsModal() {
     { id: "mcp", label: t("mcp"), icon: "globe" },
     { id: "skills", label: t("skills"), icon: "bolt" },
     { id: "plugins", label: `${t("plugins")} / ${t("marketplace")}`, icon: "layers" },
+    { id: "hooks", label: language === "zh-CN" ? "Hooks" : "Hooks", icon: "bolt" },
   ];
 
   return (
@@ -64,6 +65,7 @@ export function SettingsModal() {
           {section === "mcp" && <McpPanel />}
           {section === "skills" && <SkillsPanel />}
           {section === "plugins" && <PluginsPanel />}
+          {section === "hooks" && <HooksPanel />}
         </div>
       </div>
     </div>
@@ -88,6 +90,26 @@ function ActionButton({ children, onClick, tone = "normal", disabled = false }: 
 
 function Input({ value, onChange, placeholder, type = "text" }: { value: string; onChange(value: string): void; placeholder?: string; type?: string }) {
   return <input type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-8 w-full min-w-0 rounded-[4px] border border-line2 bg-void px-2.5 font-mono text-[10px] text-fg outline-none placeholder:text-faint focus:border-acc-dim" />;
+}
+
+function HooksPanel() {
+  const { language } = useI18n();
+  const zh = language === "zh-CN";
+  const [enabled, setEnabled] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem("grox.hooks") ?? "{}") as Record<string, boolean>; } catch { return {}; }
+  });
+  const hooks = [
+    ["session.start", zh ? "任务开始时初始化上下文" : "Initialize context when a mission starts"],
+    ["tool.before", zh ? "工具调用前检查权限与参数" : "Check permissions and arguments before tools"],
+    ["tool.after", zh ? "工具完成后记录结果摘要" : "Record a compact result after tools"],
+    ["session.stop", zh ? "任务结束时整理产物与日志" : "Collect artifacts and logs when done"],
+  ];
+  const toggle = (id: string) => setEnabled((current) => {
+    const next = { ...current, [id]: !current[id] };
+    localStorage.setItem("grox.hooks", JSON.stringify(next));
+    return next;
+  });
+  return <div><Heading title="Hooks" description={zh ? "管理 Grok Build 生命周期钩子。开关会保存到本机，并在下一次任务启动时生效。" : "Manage Grok Build lifecycle hooks. Changes are stored locally and apply to the next mission."} /><div className="space-y-2">{hooks.map(([id, description]) => <div key={id} className="flex items-center gap-3 rounded-[6px] border border-line2 bg-raise px-3 py-3"><Icon name="bolt" size={12} className={enabled[id] ? "text-gold" : "text-faint"} /><div className="min-w-0 flex-1"><p className="font-mono text-[10.5px] text-fg2">{id}</p><p className="mt-0.5 text-[10px] text-dim">{description}</p></div><Toggle on={Boolean(enabled[id])} onChange={() => toggle(id)} /></div>)}</div><div className="mt-5 rounded-[5px] border border-gold/20 bg-gold/5 px-3 py-2 text-[10px] leading-relaxed text-dim">{zh ? "提示：Hooks 与 Plugin、Skills、MCP 共用 Grok Build 扩展目录；启用后无需额外服务。" : "Hooks share the Grok Build extension directory with Plugins, Skills, and MCP; no extra service is required."}</div></div>;
 }
 
 function SecretInput({ value, onChange, hidden, onToggle, placeholder }: { value: string; onChange(value: string): void; hidden: boolean; onToggle(): void; placeholder?: string }) {

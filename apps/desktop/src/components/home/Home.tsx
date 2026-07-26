@@ -14,9 +14,11 @@ import { Icon } from "../fx/Icon";
 import { ChipSelect } from "../common/ChipSelect";
 import { PromptOptionsMenu, ProviderSwitcher } from "../common/PromptControls";
 import { useI18n } from "../../lib/i18n";
+import { MediaStudio } from "./MediaStudio";
 
 export function Home() {
   const { language, t } = useI18n();
+  const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "image" | "video">("conversation");
   const [q, setQ] = useState("");
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -77,9 +79,19 @@ export function Home() {
 
   const currentModel = models.find((item) => item.id === model);
 
+  if (workspaceMode !== "conversation") {
+    return (
+      <div className="relative flex min-h-0 flex-1 flex-col bg-base">
+        <WorkspaceTabs mode={workspaceMode} onChange={setWorkspaceMode} />
+        <MediaStudio mode={workspaceMode} />
+      </div>
+    );
+  }
+
   return (
     <div className="relative flex-1 overflow-hidden bg-base">
       <Starfield />
+      <WorkspaceTabs mode={workspaceMode} onChange={setWorkspaceMode} />
 
       {/* engineering crosshairs */}
       <Crosshair className="left-3 top-3" />
@@ -201,6 +213,25 @@ export function Home() {
         <span className="tnum max-w-[60%] truncate text-[9.5px] text-mute">{workspace}</span>
         <span className="lbl !text-[9.5px]">⌘K {language === "zh-CN" ? "命令" : "PALETTE"} · ⌘N {t("newProject")}</span>
       </div>
+    </div>
+  );
+}
+
+function WorkspaceTabs({ mode, onChange }: { mode: "conversation" | "image" | "video"; onChange(mode: "conversation" | "image" | "video"): void }) {
+  const { language } = useI18n();
+  const zh = language === "zh-CN";
+  return (
+    <div className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-1 rounded-[6px] border border-line2 bg-panel/90 p-1 shadow-lg backdrop-blur">
+      {([
+        ["conversation", zh ? "对话" : "CHAT"],
+        ["image", zh ? "图片" : "IMAGE"],
+        ["video", zh ? "视频" : "VIDEO"],
+      ] as const).map(([id, label]) => (
+        <button key={id} onClick={() => onChange(id)} className={`flex h-7 items-center gap-1.5 rounded-[4px] px-3 font-mono text-[9.5px] tracking-[0.08em] transition-colors ${mode === id ? "bg-acc text-base" : "text-dim hover:bg-high hover:text-fg2"}`}>
+          {id === "conversation" ? <Icon name="command" size={10} /> : id === "image" ? <Icon name="layers" size={10} /> : <Icon name="play" size={10} />}
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
