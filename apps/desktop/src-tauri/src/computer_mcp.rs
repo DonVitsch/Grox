@@ -392,13 +392,14 @@ pub struct Capture {
     pub png: Vec<u8>,
 }
 
+pub struct WindowState {
+    pub elements: Vec<serde_json::Value>,
+    pub png: Vec<u8>,
+}
+
 #[cfg(windows)]
 mod platform {
-    use super::Capture;
-    pub struct WindowState {
-        pub elements: Vec<serde_json::Value>,
-        pub png: Vec<u8>,
-    }
+    use super::{Capture, WindowState};
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
     use std::io::Cursor;
     use uiautomation::{types::Handle, UIAutomation};
@@ -817,7 +818,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::Capture;
+    use super::{Capture, WindowState};
     fn unsupported<T>() -> Result<T, String> {
         Err("当前 computer use 执行器仅支持 Windows".into())
     }
