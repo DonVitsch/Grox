@@ -47,8 +47,17 @@ export function Composer() {
   const setText = useDesktop((s) => s.setDraft);
   const setAttachments = useDesktop((s) => s.setComposerAttachments);
   const stop = useDesktop((s) => s.stop);
+  const emergencyStopComputer = useDesktop((s) => s.emergencyStopComputer);
   const compact = useDesktop((s) => s.compact);
   const status = useDesktop((s) => (s.activeId ? s.sessions[s.activeId]?.status : null));
+  const computerRunning = useDesktop((s) => {
+    const session = s.activeId ? s.sessions[s.activeId] : undefined;
+    return session?.blocks.some((block) =>
+      block.type === "tool" &&
+      block.call.kind === "computer" &&
+      block.call.status === "running"
+    ) ?? false;
+  });
   const model = useDesktop((s) => s.model);
   const models = useDesktop((s) => s.models);
   const effort = useDesktop((s) => s.effort);
@@ -343,13 +352,23 @@ export function Composer() {
             )}
 
             {running ? (
-              <button
-                onClick={stop}
-                title="Abort turn"
-                className="flex h-7 w-7 items-center justify-center rounded-[5px] border border-red/50 text-red transition-colors hover:bg-red/10"
-              >
-                <Icon name="stop" size={11} />
-              </button>
+              <>
+                {computerRunning && <button
+                  onClick={emergencyStopComputer}
+                  title={language === "zh-CN" ? "紧急停止 Computer Use，并锁定当前控制租约" : "Emergency stop Computer Use and lock this control lease"}
+                  className="flex h-7 items-center gap-1.5 rounded-[5px] border border-red/70 bg-red/5 px-2 font-mono text-[9px] text-red transition-colors hover:bg-red/10"
+                >
+                  <Icon name="stop" size={10} />
+                  {language === "zh-CN" ? "紧急停止" : "E-STOP"}
+                </button>}
+                <button
+                  onClick={stop}
+                  title="Abort turn"
+                  className="flex h-7 w-7 items-center justify-center rounded-[5px] border border-red/50 text-red transition-colors hover:bg-red/10"
+                >
+                  <Icon name="stop" size={11} />
+                </button>
+              </>
             ) : (
               <button
                 onClick={send}

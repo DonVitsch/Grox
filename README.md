@@ -14,6 +14,7 @@ Grox 是以 [xai-org/grok-build](https://github.com/xai-org/grok-build) 为核�
 - 项目与任务目录：项目可置顶、在资源管理器打开、重命名、归档和移除；任务可置顶与归档
 - Agent 时间线：回答、思考、计划、工具调用、终端输出与文件 Diff；任务完成后自动收纳处理过程，工具详情默认折叠
 - Deep Research：原生启动 `/deep-research` 后台工作流，在任务检查器实时展示研究阶段、并行代理、代理预算、耗时、暂停原因和结果摘要，并可暂停、恢复或停止
+- Computer Use（Windows）：窗口级截图、UI Automation、元素与坐标操作、水平/垂直滚动、键盘布局映射、暂停/继续，以及界面按钮和 `Ctrl+Alt+Esc` 粘性紧急停止
 - 安全预览侧栏：支持 Markdown、静态 HTML、图片与文本文件，可拖动调整侧栏、检查器和预览区宽度
 - 交互闭环：对话框可直接切换模型、权限和思考强度，支持文件上传、剪贴板图片粘贴、计划批准及结构化问答
 - 多账户接入：Grok OAuth、xAI 官方 API 与 OpenAI 兼容服务；API 密钥、Base URL 和模型列表地址统一在账户模块管理，密钥不回传 WebView
@@ -97,6 +98,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## 上游与许可证
 
 Grox 持续追踪 `xai-org/grok-build` 的官方发布、ACP 协议和功能变化，并在桌面层跟进适配；不复制、修改或重新发布官方 CLI。第一方代码遵循 [Apache License 2.0](LICENSE)，第三方代码继续遵循各自许可证，详见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES)。
+
+Windows Computer Use 的交互模型、安全边界和兼容性修复参考并移植自社区项目 [wangyingxuan383-ai/grok-build-desktop](https://github.com/wangyingxuan383-ai/grok-build-desktop)，在 Grox 中按 Tauri/Rust/MCP 架构重新实现。
 
 `.grox/official-cli.json` 记录已完成兼容性审查的官方 commit 与 CLI 版本。每日自动检查发现上游更新后会创建或更新适配 Issue，但不会自动引入未经验证的协议变化。
 

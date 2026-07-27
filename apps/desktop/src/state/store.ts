@@ -165,6 +165,7 @@ interface DesktopState {
 
   sendPrompt(text: string, attachments?: PromptAttachment[]): void;
   stop(): void;
+  emergencyStopComputer(): void;
   compact(): void;
   listRewindPoints(): Promise<RewindPoint[]>;
   previewRewind(targetPromptIndex: number, mode: RewindMode): Promise<RewindResult>;
@@ -1245,6 +1246,11 @@ export const useDesktop = create<DesktopState>((set, get) => {
     stop() {
       const { activeId } = get();
       if (activeId) bridge.cancel(activeId);
+    },
+
+    emergencyStopComputer() {
+      const { activeId } = get();
+      if (activeId) void bridge.emergencyStopComputer(activeId);
     },
 
     compact() {

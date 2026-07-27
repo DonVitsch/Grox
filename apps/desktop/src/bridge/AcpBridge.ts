@@ -366,7 +366,13 @@ function mapToolKind(kindValue: unknown, titleValue: unknown): ToolKind {
   if (TOOL_KINDS.has(exact as ToolKind)) return exact as ToolKind;
   if (exact === "fetch") return "web_fetch";
   const source = `${exact} ${string(titleValue) ?? ""}`.toLowerCase();
-  if (/\b(computer_(screenshot|mouse|click|drag|scroll|key|type|wait)|list_(apps|windows)|get_window_state|activate_window|double_click|press_key|set_value)\b/.test(source)) return "computer";
+  if (
+    /\bcomputer_(screenshot|mouse|click|drag|scroll|key|type|wait)\b/.test(source) ||
+    (
+      /\bcomputer\b/.test(source) &&
+      /\b(list_(apps|windows)|start|pause|resume|stop|get_window_state|activate_window|click|double_click|perform_secondary_action|scroll|press_key|type_text|set_value|drag|wait)\b/.test(source)
+    )
+  ) return "computer";
   if (/\bgoal\b/.test(source)) return "goal_update";
   if (/\bworkflow\b/.test(source)) return "task";
   if (/\b(read|view|cat)\b/.test(source)) return "read";
@@ -545,6 +551,7 @@ function mapPlanSteps(value: unknown): PlanStep[] {
 interface ComputerSessionExtensions {
   mcpServers: unknown[];
   pluginDirs: string[];
+  leaseId: string;
 }
 
 function mapAvailableCommands(value: unknown): SlashCommand[] {
@@ -772,6 +779,9 @@ export class AcpBridge implements GrokBridge {
         : "default";
   private workspace = "";
   private sessionWorkspaces = new Map<string, string>();
+  private computerLeases = new Map<string, string>();
+  private activeComputerSessions = new Set<string>();
+  private activeComputerToolCalls = new Set<string>();
   private ready: Promise<void>;
 
   constructor() {
@@ -874,6 +884,11 @@ export class AcpBridge implements GrokBridge {
         this.diagnostics = this.diagnostics.slice(-20);
       }),
       await listen<ExitPayload>("acp-exit", ({ payload }) => this.onExit(payload)),
+      await listen("computer-emergency-shortcut", () => {
+        for (const sessionId of this.activeComputerSessions) {
+          void this.emergencyStopComputer(sessionId);
+        }
+      }),
     );
 
     await this.initializeAgent();
@@ -1369,6 +1384,10 @@ export class AcpBridge implements GrokBridge {
       ),
       locations: extractLocations(update.locations, update.rawInput, update.rawOutput, content),
     };
+    if (kind === "computer" && call.status === "running") {
+      this.activeComputerToolCalls.add(`${sessionId}:${toolCallId}`);
+      this.activeComputerSessions.add(sessionId);
+    }
     this.emit({
       type: "block_add",
       sessionId,
@@ -1396,6 +1415,20 @@ export class AcpBridge implements GrokBridge {
       content,
     );
     const kind = mapToolKind(update.kind, update.title);
+    const computerToolKey = `${sessionId}:${toolCallId}`;
+    const isComputerTool = kind === "computer" || this.activeComputerToolCalls.has(computerToolKey);
+    if (isComputerTool) {
+      if (status === "running") {
+        this.activeComputerToolCalls.add(computerToolKey);
+        this.activeComputerSessions.add(sessionId);
+      }
+      else if (status === "done" || status === "error" || status === "cancelled") {
+        this.activeComputerToolCalls.delete(computerToolKey);
+        if (![...this.activeComputerToolCalls].some((key) => key.startsWith(`${sessionId}:`))) {
+          this.activeComputerSessions.delete(sessionId);
+        }
+      }
+    }
     const locations = extractLocations(update.locations, update.rawInput, update.rawOutput, content);
     this.queueToolPatch({
       type: "tool_patch",
@@ -2039,6 +2072,7 @@ export class AcpBridge implements GrokBridge {
     const response = record(responseValue);
     const sessionId = string(response?.sessionId);
     if (!sessionId) throw new Error("session/new 未返回 sessionId");
+    this.computerLeases.set(sessionId, computer.leaseId);
     this.captureModelState(response);
     this.captureRuntimeCommands(response);
     const detail = record(record(response?._meta)?.["x.ai/sessionDetail"]);
@@ -2080,6 +2114,11 @@ export class AcpBridge implements GrokBridge {
         mcpServers: computer.mcpServers,
         _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
       }, 2 * 60_000);
+      const previousLease = this.computerLeases.get(id);
+      if (previousLease && previousLease !== computer.leaseId) {
+        await invoke("computer_clear_emergency_stop", { leaseId: previousLease }).catch(() => {});
+      }
+      this.computerLeases.set(id, computer.leaseId);
       this.flushStreamAppends(id);
       this.flushToolPatches(id);
       this.captureModelState(response);
@@ -2195,6 +2234,14 @@ export class AcpBridge implements GrokBridge {
     });
   }
 
+  async emergencyStopComputer(sessionId: string): Promise<void> {
+    const leaseId = this.computerLeases.get(sessionId);
+    if (leaseId) {
+      await invoke("computer_emergency_stop", { leaseId });
+    }
+    this.cancel(sessionId);
+  }
+
   async compact(sessionId: string): Promise<void> {
     try {
       await this.request(ACP_METHODS.compact, { sessionId });
@@ -2299,12 +2346,21 @@ export class AcpBridge implements GrokBridge {
   async deleteSession(id: string): Promise<void> {
     const meta = this.catalogue.get(id);
     this.cancel(id);
+    const computerLease = this.computerLeases.get(id);
+    if (computerLease) {
+      await invoke("computer_clear_emergency_stop", { leaseId: computerLease }).catch(() => {});
+    }
     await this.request(ACP_METHODS.sessionDelete, {
       sessionId: id,
       cwd: meta?.cwd ?? this.workspace,
       kind: "build",
     });
     this.catalogue.delete(id);
+    this.computerLeases.delete(id);
+    this.activeComputerSessions.delete(id);
+    for (const key of this.activeComputerToolCalls) {
+      if (key.startsWith(`${id}:`)) this.activeComputerToolCalls.delete(key);
+    }
     this.knownSessions.delete(id);
     this.sessionWorkspaces.delete(id);
     this.cursors.delete(id);

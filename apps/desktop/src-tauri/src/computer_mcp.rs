@@ -1,11 +1,17 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Write},
+    path::PathBuf,
+};
 
-pub fn run() -> Result<(), String> {
+pub fn run(lease_id: Option<String>) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
-    let mut state = ComputerState::default();
+    let mut state = ComputerState {
+        lease_id,
+        ..ComputerState::default()
+    };
     for line in stdin.lock().lines() {
         let line = line.map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
@@ -51,7 +57,7 @@ pub fn run() -> Result<(), String> {
             Err(message) => json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "content": [{ "type": "text", "text": message }], "isError": true }
+                "result": { "content": [{ "type": "text", "text": classified_error(&message) }], "isError": true }
             }),
         };
         write_message(&mut stdout, &response)?;
@@ -59,11 +65,26 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn classified_error(message: &str) -> String {
+    let (code, text) = [
+        ("elevation-blocked", "elevation-blocked:"),
+        ("uac-handoff", "uac-handoff:"),
+        ("blocklist", "blocklist:"),
+    ]
+    .into_iter()
+    .find_map(|(code, prefix)| message.strip_prefix(prefix).map(|text| (code, text.trim())))
+    .unwrap_or(("action-failed", message));
+    serde_json::to_string(&json!({"errorCode": code, "message": text}))
+        .unwrap_or_else(|_| message.to_string())
+}
+
 #[derive(Default)]
 struct ComputerState {
     active_window: Option<i64>,
     state_id: u64,
     stopped: bool,
+    paused: bool,
+    lease_id: Option<String>,
 }
 
 fn write_message(stdout: &mut impl Write, value: &Value) -> Result<(), String> {
@@ -82,7 +103,7 @@ fn tools() -> Vec<Value> {
         tool(
             "list_windows",
             "列出当前可控的顶层窗口及其窗口句柄。",
-            json!({"type":"object","properties":{},"additionalProperties":false}),
+            json!({"type":"object","properties":{"appId":{"type":"string"}},"additionalProperties":false}),
         ),
         tool(
             "start",
@@ -90,8 +111,18 @@ fn tools() -> Vec<Value> {
             json!({"type":"object","properties":{"windowId":{"type":"integer"}},"required":["windowId"],"additionalProperties":false}),
         ),
         tool(
+            "pause",
+            "暂停当前 Computer Use 会话。",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "resume",
+            "继续已暂停的 Computer Use 会话并重新观察窗口。",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
             "stop",
-            "停止当前 Computer Use 会话并清除活动窗口。",
+            "紧急停止当前 Computer Use 会话；必须重新创建或加载会话后才能再次控制。",
             json!({"type":"object","properties":{},"additionalProperties":false}),
         ),
         tool(
@@ -102,7 +133,12 @@ fn tools() -> Vec<Value> {
         tool(
             "activate_window",
             "重新激活已选择的窗口。",
-            json!({"type":"object","properties":{},"additionalProperties":false}),
+            json!({"type":"object","properties":{"stateId":{"type":"integer"}},"required":["stateId"],"additionalProperties":false}),
+        ),
+        tool(
+            "click",
+            "单击当前窗口内的 UI Automation 元素或截图坐标。",
+            target_schema(),
         ),
         tool(
             "press_key",
@@ -112,57 +148,73 @@ fn tools() -> Vec<Value> {
         tool(
             "type_text",
             "输入文本。",
-            json!({"type":"object","properties":{"text":{"type":"string","maxLength":20000},"stateId":{"type":"integer"}},"required":["text","stateId"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"elementId":{"type":"string","minLength":1},"text":{"type":"string","maxLength":20000},"stateId":{"type":"integer"}},"required":["text","stateId"],"additionalProperties":false}),
         ),
         tool(
             "set_value",
             "通过 UI Automation 设置元素值。",
             json!({"type":"object","properties":{"elementId":{"type":"string"},"value":{"type":"string"},"stateId":{"type":"integer"}},"required":["elementId","value","stateId"],"additionalProperties":false}),
         ),
+        tool("double_click", "双击指定元素或坐标。", target_schema()),
         tool(
-            "double_click",
-            "双击指定元素或坐标。",
-            json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"stateId":{"type":"integer"}},"required":["x","y","stateId"],"additionalProperties":false}),
+            "perform_secondary_action",
+            "在当前窗口内执行右键操作。",
+            target_schema(),
+        ),
+        tool(
+            "scroll",
+            "在当前窗口内垂直或水平滚动。",
+            json!({"type":"object","properties":{"elementId":{"type":"string","minLength":1},"x":{"type":"integer"},"y":{"type":"integer"},"deltaX":{"type":"integer","minimum":-2400,"maximum":2400},"deltaY":{"type":"integer","minimum":-2400,"maximum":2400},"stateId":{"type":"integer"}},"required":["stateId"],"additionalProperties":false}),
+        ),
+        tool(
+            "drag",
+            "在当前窗口内拖动；起点可使用元素或截图坐标。",
+            json!({"type":"object","properties":{"elementId":{"type":"string","minLength":1},"x":{"type":"integer"},"y":{"type":"integer"},"endX":{"type":"integer"},"endY":{"type":"integer"},"durationMs":{"type":"integer","minimum":0,"maximum":5000,"default":500},"stateId":{"type":"integer"}},"required":["endX","endY","stateId"],"additionalProperties":false}),
+        ),
+        tool(
+            "wait",
+            "等待界面稳定后重新观察窗口。",
+            json!({"type":"object","properties":{"milliseconds":{"type":"integer","minimum":0,"maximum":30000},"stateId":{"type":"integer"}},"required":["stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_screenshot",
-            "捕获当前桌面的完整屏幕。返回 PNG 截图和屏幕尺寸。",
+            "兼容工具：观察当前目标窗口，不捕获其他桌面内容。",
             json!({"type":"object","properties":{},"additionalProperties":false}),
         ),
         tool(
             "computer_mouse_move",
-            "将鼠标移动到屏幕绝对坐标。",
-            xy_schema(),
+            "兼容工具：将鼠标移动到当前窗口截图坐标。",
+            state_xy_schema(),
         ),
         tool(
             "computer_click",
-            "在屏幕坐标执行鼠标单击、双击或右击。",
-            json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"button":{"type":"string","enum":["left","right","middle"],"default":"left"},"clicks":{"type":"integer","minimum":1,"maximum":2,"default":1}},"required":["x","y"],"additionalProperties":false}),
+            "兼容工具：在当前窗口截图坐标执行鼠标单击、双击或右击。",
+            json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"button":{"type":"string","enum":["left","right","middle"],"default":"left"},"clicks":{"type":"integer","minimum":1,"maximum":2,"default":1},"stateId":{"type":"integer"}},"required":["x","y","stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_drag",
-            "按住鼠标从起点拖动到终点。",
-            json!({"type":"object","properties":{"fromX":{"type":"integer"},"fromY":{"type":"integer"},"toX":{"type":"integer"},"toY":{"type":"integer"},"durationMs":{"type":"integer","minimum":0,"maximum":5000,"default":500}},"required":["fromX","fromY","toX","toY"],"additionalProperties":false}),
+            "兼容工具：在当前窗口截图坐标内拖动。",
+            json!({"type":"object","properties":{"fromX":{"type":"integer"},"fromY":{"type":"integer"},"toX":{"type":"integer"},"toY":{"type":"integer"},"durationMs":{"type":"integer","minimum":0,"maximum":5000,"default":500},"stateId":{"type":"integer"}},"required":["fromX","fromY","toX","toY","stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_scroll",
-            "在指定坐标滚动鼠标滚轮；正数向上，负数向下。",
-            json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"delta":{"type":"integer","minimum":-2400,"maximum":2400}},"required":["x","y","delta"],"additionalProperties":false}),
+            "兼容工具：在当前窗口截图坐标滚动鼠标滚轮。",
+            json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"deltaX":{"type":"integer","minimum":-2400,"maximum":2400},"deltaY":{"type":"integer","minimum":-2400,"maximum":2400},"delta":{"type":"integer","minimum":-2400,"maximum":2400},"stateId":{"type":"integer"}},"required":["x","y","stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_key",
             "按下组合键，例如 CTRL+L、ALT+TAB、ENTER、ESC。",
-            json!({"type":"object","properties":{"keys":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}},"required":["keys"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"keys":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8},"stateId":{"type":"integer"}},"required":["keys","stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_type",
             "通过 Unicode 键盘事件输入文本。",
-            json!({"type":"object","properties":{"text":{"type":"string","maxLength":20000}},"required":["text"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"text":{"type":"string","maxLength":20000},"stateId":{"type":"integer"}},"required":["text","stateId"],"additionalProperties":false}),
         ),
         tool(
             "computer_wait",
             "等待界面完成动画或加载。",
-            json!({"type":"object","properties":{"milliseconds":{"type":"integer","minimum":0,"maximum":10000}},"required":["milliseconds"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"milliseconds":{"type":"integer","minimum":0,"maximum":30000},"stateId":{"type":"integer"}},"required":["stateId"],"additionalProperties":false}),
         ),
     ]
 }
@@ -171,8 +223,12 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": input_schema })
 }
 
-fn xy_schema() -> Value {
-    json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"],"additionalProperties":false})
+fn target_schema() -> Value {
+    json!({"type":"object","properties":{"elementId":{"type":"string","minLength":1},"x":{"type":"integer"},"y":{"type":"integer"},"stateId":{"type":"integer"}},"required":["stateId"],"additionalProperties":false})
+}
+
+fn state_xy_schema() -> Value {
+    json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"stateId":{"type":"integer"}},"required":["x","y","stateId"],"additionalProperties":false})
 }
 
 fn call_tool(params: Value, state: &mut ComputerState) -> Result<Value, String> {
@@ -184,35 +240,115 @@ fn call_tool(params: Value, state: &mut ComputerState) -> Result<Value, String> 
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    audit_event(name, state.active_window);
-    if state.stopped && name != "start" && name != "list_apps" && name != "list_windows" {
-        return Err("会话已停止，请先调用 start".into());
+    if state
+        .lease_id
+        .as_deref()
+        .is_some_and(emergency_stop_requested)
+    {
+        state.active_window = None;
+        state.paused = false;
+        state.stopped = true;
+    }
+    let result = call_tool_inner(name, &args, state);
+    audit_event(
+        name,
+        state.active_window,
+        if result.is_ok() { "success" } else { "failure" },
+    );
+    result
+}
+
+fn call_tool_inner(name: &str, args: &Value, state: &mut ComputerState) -> Result<Value, String> {
+    if state.stopped && !matches!(name, "list_apps" | "list_windows" | "stop") {
+        return Err(
+            "Computer Use 已紧急停止；为防止代理自动恢复，必须由用户重新创建或加载会话后才能再次控制"
+                .into(),
+        );
+    }
+    if state.paused && !matches!(name, "list_apps" | "list_windows" | "resume" | "stop") {
+        return Err("Computer Use 已暂停；请先调用 resume 或 stop".into());
     }
     match name {
-        "list_apps" | "list_windows" => Ok(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&platform::list_windows()?).map_err(|e| e.to_string())? }] }),
-        ),
+        "list_apps" => Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&list_apps()?).map_err(|error| error.to_string())?
+            }]
+        })),
+        "list_windows" => {
+            let app_id = args.get("appId").and_then(Value::as_str);
+            let windows = platform::list_windows()?
+                .into_iter()
+                .filter(|window| {
+                    app_id.map_or(true, |expected| {
+                        window.get("appId").and_then(Value::as_str) == Some(expected)
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&windows).map_err(|error| error.to_string())?
+                }]
+            }))
+        }
         "start" => {
-            let hwnd = int64(&args, "windowId")?;
+            let hwnd = int64(args, "windowId")?;
             platform::activate(hwnd)?;
             state.active_window = Some(hwnd);
-            state.stopped = false;
-            state.state_id = state.state_id.saturating_add(1);
-            window_state(state)
+            state.paused = false;
+            observe(state)
+        }
+        "pause" => {
+            ensure_active(state)?;
+            state.paused = true;
+            ok_text("Computer Use 已暂停")
+        }
+        "resume" => {
+            if !state.paused {
+                return Err("Computer Use 当前未暂停".into());
+            }
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            platform::activate(hwnd)?;
+            state.paused = false;
+            observe(state)
         }
         "stop" => {
             state.active_window = None;
+            state.paused = false;
             state.stopped = true;
-            ok_text("Computer Use 已停止")
+            if let Some(lease_id) = state.lease_id.as_deref() {
+                mark_emergency_stop(lease_id)?;
+            }
+            ok_text("Computer Use 已紧急停止；重新创建或加载会话后才能再次控制")
         }
         "activate_window" => {
+            check_state(args, state)?;
             let hwnd = state.active_window.ok_or("尚未选择窗口")?;
             platform::activate(hwnd)?;
-            ok_text("窗口已激活")
+            observe(state)
         }
-        "get_window_state" => window_state(state),
+        "get_window_state" => observe(state),
+        "click" | "double_click" | "perform_secondary_action" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            let (x, y) = platform::target_point(
+                hwnd,
+                args.get("elementId").and_then(Value::as_str),
+                optional_int(args, "x"),
+                optional_int(args, "y"),
+            )?;
+            let (button, clicks) = match name {
+                "perform_secondary_action" => ("right", 1),
+                "double_click" => ("left", 2),
+                _ => ("left", 1),
+            };
+            platform::click(hwnd, x, y, button, clicks)?;
+            observe(state)
+        }
         "press_key" => {
-            check_state(&args, state)?;
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
             let keys = args
                 .get("keys")
                 .and_then(Value::as_array)
@@ -220,72 +356,143 @@ fn call_tool(params: Value, state: &mut ComputerState) -> Result<Value, String> 
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>();
-            platform::key(&keys)?;
-            observe_after_action(state)
+            platform::key(hwnd, &keys)?;
+            observe(state)
         }
         "type_text" => {
-            check_state(&args, state)?;
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            if let Some(element_id) = args.get("elementId").and_then(Value::as_str) {
+                let (x, y) = platform::target_point(hwnd, Some(element_id), None, None)?;
+                platform::click(hwnd, x, y, "left", 1)?;
+            }
             platform::type_text(
+                hwnd,
                 args.get("text")
                     .and_then(Value::as_str)
                     .ok_or("缺少 text")?,
             )?;
-            observe_after_action(state)
+            observe(state)
         }
         "set_value" => {
-            check_state(&args, state)?;
-            platform::set_value(&args)?;
-            observe_after_action(state)
-        }
-        "double_click" => {
-            check_state(&args, state)?;
-            platform::click(int(&args, "x")?, int(&args, "y")?, "left", 2)?;
-            observe_after_action(state)
-        }
-        "computer_screenshot" => {
-            let capture = platform::screenshot()?;
-            Ok(json!({
-                "content": [
-                    { "type": "text", "text": format!("屏幕尺寸：{}×{}", capture.width, capture.height) },
-                    { "type": "image", "data": BASE64.encode(capture.png), "mimeType": "image/png" }
-                ]
-            }))
-        }
-        "computer_mouse_move" => {
-            ensure_active(state)?;
-            platform::move_mouse(int(&args, "x")?, int(&args, "y")?)?;
-            ok_text("鼠标已移动")
-        }
-        "computer_click" => {
-            ensure_active(state)?;
-            platform::click(
-                int(&args, "x")?,
-                int(&args, "y")?,
-                args.get("button").and_then(Value::as_str).unwrap_or("left"),
-                args.get("clicks").and_then(Value::as_u64).unwrap_or(1) as u32,
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            platform::set_value(
+                hwnd,
+                args.get("elementId")
+                    .and_then(Value::as_str)
+                    .ok_or("缺少 elementId")?,
+                args.get("value")
+                    .and_then(Value::as_str)
+                    .ok_or("缺少 value")?,
             )?;
-            ok_text("点击完成")
+            observe(state)
         }
-        "computer_drag" => {
-            ensure_active(state)?;
+        "scroll" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            let delta_x = optional_int(args, "deltaX").unwrap_or(0);
+            let delta_y = optional_int(args, "deltaY")
+                .or_else(|| optional_int(args, "delta"))
+                .unwrap_or(if delta_x == 0 { -480 } else { 0 });
+            platform::scroll(
+                hwnd,
+                args.get("elementId").and_then(Value::as_str),
+                optional_int(args, "x"),
+                optional_int(args, "y"),
+                delta_x,
+                delta_y,
+            )?;
+            observe(state)
+        }
+        "drag" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            let (from_x, from_y) = platform::target_point(
+                hwnd,
+                args.get("elementId").and_then(Value::as_str),
+                optional_int(args, "x"),
+                optional_int(args, "y"),
+            )?;
             platform::drag(
-                int(&args, "fromX")?,
-                int(&args, "fromY")?,
-                int(&args, "toX")?,
-                int(&args, "toY")?,
+                hwnd,
+                from_x,
+                from_y,
+                int(args, "endX")?,
+                int(args, "endY")?,
                 args.get("durationMs")
                     .and_then(Value::as_u64)
                     .unwrap_or(500),
             )?;
-            ok_text("拖动完成")
+            observe(state)
+        }
+        "wait" => {
+            check_state(args, state)?;
+            std::thread::sleep(std::time::Duration::from_millis(
+                args.get("milliseconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(500)
+                    .min(30_000),
+            ));
+            observe(state)
+        }
+        "computer_screenshot" => {
+            ensure_active(state)?;
+            observe(state)
+        }
+        "computer_mouse_move" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            platform::move_mouse(hwnd, int(args, "x")?, int(args, "y")?)?;
+            observe(state)
+        }
+        "computer_click" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            platform::click(
+                hwnd,
+                int(args, "x")?,
+                int(args, "y")?,
+                args.get("button").and_then(Value::as_str).unwrap_or("left"),
+                args.get("clicks").and_then(Value::as_u64).unwrap_or(1) as u32,
+            )?;
+            observe(state)
+        }
+        "computer_drag" => {
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            platform::drag(
+                hwnd,
+                int(args, "fromX")?,
+                int(args, "fromY")?,
+                int(args, "toX")?,
+                int(args, "toY")?,
+                args.get("durationMs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(500),
+            )?;
+            observe(state)
         }
         "computer_scroll" => {
-            ensure_active(state)?;
-            platform::scroll(int(&args, "x")?, int(&args, "y")?, int(&args, "delta")?)?;
-            ok_text("滚动完成")
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
+            let delta_x = optional_int(args, "deltaX").unwrap_or(0);
+            let delta_y = optional_int(args, "deltaY")
+                .or_else(|| optional_int(args, "delta"))
+                .unwrap_or(if delta_x == 0 { -480 } else { 0 });
+            platform::scroll(
+                hwnd,
+                None,
+                optional_int(args, "x"),
+                optional_int(args, "y"),
+                delta_x,
+                delta_y,
+            )?;
+            observe(state)
         }
         "computer_key" => {
-            ensure_active(state)?;
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
             let keys = args
                 .get("keys")
                 .and_then(Value::as_array)
@@ -293,32 +500,102 @@ fn call_tool(params: Value, state: &mut ComputerState) -> Result<Value, String> 
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>();
-            platform::key(&keys)?;
-            ok_text("按键完成")
+            platform::key(hwnd, &keys)?;
+            observe(state)
         }
         "computer_type" => {
-            ensure_active(state)?;
+            check_state(args, state)?;
+            let hwnd = state.active_window.ok_or("尚未选择窗口")?;
             platform::type_text(
+                hwnd,
                 args.get("text")
                     .and_then(Value::as_str)
                     .ok_or("缺少 text")?,
             )?;
-            ok_text("文本输入完成")
+            observe(state)
         }
         "computer_wait" => {
+            check_state(args, state)?;
             std::thread::sleep(std::time::Duration::from_millis(
                 args.get("milliseconds")
                     .and_then(Value::as_u64)
                     .unwrap_or(500)
-                    .min(10_000),
+                    .min(30_000),
             ));
-            ok_text("等待完成")
+            observe(state)
         }
         _ => Err(format!("未知工具：{name}")),
     }
 }
 
-fn audit_event(action: &str, window: Option<i64>) {
+fn list_apps() -> Result<Vec<Value>, String> {
+    let mut apps = std::collections::BTreeMap::<String, Value>::new();
+    for window in platform::list_windows()? {
+        let app_id = window
+            .get("appId")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let entry = apps.entry(app_id.clone()).or_insert_with(|| {
+            json!({
+                "appId": app_id,
+                "name": window.get("processName").cloned().unwrap_or_else(|| json!("unknown")),
+                "processName": window.get("processName").cloned().unwrap_or_else(|| json!("unknown")),
+                "executablePath": window.get("executablePath").cloned().unwrap_or(Value::Null),
+                "windowCount": 0,
+                "controllable": false,
+                "blockedReason": window.get("blockedReason").cloned().unwrap_or(Value::Null),
+                "blockedCode": window.get("blockedCode").cloned().unwrap_or(Value::Null)
+            })
+        });
+        entry["windowCount"] = json!(entry["windowCount"].as_u64().unwrap_or_default() + 1);
+        if window.get("controllable").and_then(Value::as_bool) == Some(true) {
+            entry["controllable"] = json!(true);
+            entry["blockedReason"] = Value::Null;
+            entry["blockedCode"] = Value::Null;
+        }
+    }
+    Ok(apps.into_values().collect())
+}
+
+fn emergency_stop_marker(lease_id: &str) -> Result<PathBuf, String> {
+    if lease_id.len() != 32 || !lease_id.bytes().all(|value| value.is_ascii_hexdigit()) {
+        return Err("Computer Use 租约标识无效".into());
+    }
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Grox")
+        .join("computer-use-stops");
+    Ok(root.join(format!("{lease_id}.stop")))
+}
+
+pub fn mark_emergency_stop(lease_id: &str) -> Result<(), String> {
+    let path = emergency_stop_marker(lease_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建 Computer Use 停止目录：{error}"))?;
+    }
+    std::fs::write(path, b"stopped")
+        .map_err(|error| format!("无法写入 Computer Use 紧急停止标记：{error}"))
+}
+
+pub fn clear_emergency_stop(lease_id: &str) -> Result<(), String> {
+    let path = emergency_stop_marker(lease_id)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法清除 Computer Use 紧急停止标记：{error}")),
+    }
+}
+
+fn emergency_stop_requested(lease_id: &str) -> bool {
+    emergency_stop_marker(lease_id)
+        .map(|path| path.is_file())
+        .unwrap_or(true)
+}
+
+fn audit_event(action: &str, window: Option<i64>, outcome: &str) {
     if let Ok(profile) = std::env::var("USERPROFILE") {
         let path = std::path::PathBuf::from(profile)
             .join(".grok")
@@ -331,7 +608,11 @@ fn audit_event(action: &str, window: Option<i64>) {
             .append(true)
             .open(path)
         {
-            let record = json!({"timestamp": format!("{:?}", std::time::SystemTime::now()), "action": action, "windowId": window});
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or_default();
+            let record = json!({"timestampMs": timestamp, "action": action, "windowId": window, "outcome": outcome});
             let _ = writeln!(file, "{}", record);
         }
     }
@@ -361,7 +642,7 @@ fn check_state(args: &Value, state: &ComputerState) -> Result<(), String> {
     }
     Ok(())
 }
-fn observe_after_action(state: &mut ComputerState) -> Result<Value, String> {
+fn observe(state: &mut ComputerState) -> Result<Value, String> {
     state.state_id = state.state_id.saturating_add(1);
     window_state(state)
 }
@@ -369,7 +650,14 @@ fn window_state(state: &ComputerState) -> Result<Value, String> {
     let hwnd = state.active_window.ok_or("尚未选择窗口")?;
     let capture = platform::window_state(hwnd)?;
     Ok(json!({"content":[
-        {"type":"text","text":serde_json::to_string(&json!({"stateId":state.state_id,"windowId":hwnd,"elements":capture.elements})).map_err(|e| e.to_string())?},
+        {"type":"text","text":serde_json::to_string(&json!({
+            "stateId":state.state_id,
+            "window":capture.window,
+            "screenshotSize":{"width":capture.width,"height":capture.height},
+            "coordinateSpace":"window-screenshot-pixels",
+            "elements":capture.elements,
+            "treeTruncated":capture.tree_truncated
+        })).map_err(|e| e.to_string())?},
         {"type":"image","data":BASE64.encode(capture.png),"mimeType":"image/png"}
     ]}))
 }
@@ -386,35 +674,68 @@ fn ok_text(text: &str) -> Result<Value, String> {
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }
 
+#[cfg(windows)]
 pub struct Capture {
-    pub width: i32,
-    pub height: i32,
     pub png: Vec<u8>,
+}
+
+fn optional_int(value: &Value, key: &str) -> Option<i32> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .and_then(|number| i32::try_from(number).ok())
+}
+
+fn clamp_window_point(width: i32, height: i32, x: i32, y: i32) -> (i32, i32) {
+    (
+        x.clamp(0, (width - 1).max(0)),
+        y.clamp(0, (height - 1).max(0)),
+    )
 }
 
 pub struct WindowState {
     pub elements: Vec<serde_json::Value>,
     pub png: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub window: serde_json::Value,
+    pub tree_truncated: bool,
 }
 
 #[cfg(windows)]
 mod platform {
     use super::{Capture, WindowState};
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
-    use std::io::Cursor;
-    use uiautomation::{types::Handle, UIAutomation};
+    use serde_json::Value;
+    use std::{cell::RefCell, collections::HashMap, io::Cursor, path::Path};
+    use uiautomation::{
+        patterns::{UIInvokePattern, UIScrollItemPattern, UIValuePattern},
+        types::Handle,
+        UIAutomation, UIElement,
+    };
+    use windows::core::PWSTR;
     use windows::Win32::{
-        Foundation::{BOOL, HWND, LPARAM},
+        Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT},
         Graphics::Gdi::*,
+        Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+        System::Threading::{
+            AttachThreadInput, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+            QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
         UI::{
+            HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::*,
             WindowsAndMessaging::{
-                EnumWindows, GetSystemMetrics, GetWindowTextW, IsWindowVisible, SetCursorPos,
-                SetForegroundWindow, ShowWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
+                BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+                GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetCursorPos,
+                SetForegroundWindow, ShowWindow, SW_RESTORE,
             },
         },
     };
+
+    thread_local! {
+        static ELEMENTS: RefCell<HashMap<String, UIElement>> = RefCell::new(HashMap::new());
+    }
 
     pub fn list_windows() -> Result<Vec<serde_json::Value>, String> {
         let mut out = Vec::new();
@@ -434,61 +755,255 @@ mod platform {
         let title = String::from_utf16_lossy(&buffer[..len as usize])
             .trim()
             .to_string();
-        if title.is_empty() || is_blocked_title(&title) {
+        if title.is_empty() {
+            return true.into();
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err()
+            || rect.right <= rect.left
+            || rect.bottom <= rect.top
+        {
             return true.into();
         }
         let out = &mut *(lparam.0 as *mut Vec<serde_json::Value>);
-        out.push(
-            serde_json::json!({"windowId": hwnd.0 as i64, "title": title, "controllable": true}),
-        );
+        out.push(window_info(hwnd, title));
         true.into()
     }
 
-    fn is_blocked_title(title: &str) -> bool {
-        let lower = title.to_ascii_lowercase();
+    fn window_info(hwnd: HWND, title: String) -> serde_json::Value {
+        unsafe {
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+            let mut process_id = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+            let executable_path = process_path(process_id);
+            let process_name = executable_path
+                .as_deref()
+                .and_then(|value| Path::new(value).file_stem())
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let elevated =
+                is_process_elevated(process_id) && !is_process_elevated(std::process::id());
+            let blocklisted = is_blocked_target(&process_name, &title);
+            let blocked_code = if elevated {
+                Some("elevated")
+            } else if blocklisted {
+                Some("blocklist")
+            } else {
+                None
+            };
+            let blocked_reason = match blocked_code {
+                Some("elevated") => Some("目标窗口运行于更高权限级别"),
+                Some("blocklist") => Some("该应用位于 Computer Use 不可控制清单"),
+                _ => None,
+            };
+            serde_json::json!({
+                "windowId": hwnd.0 as i64,
+                "appId": process_name.to_ascii_lowercase(),
+                "processId": process_id,
+                "processName": process_name,
+                "executablePath": executable_path,
+                "title": title,
+                "bounds": {
+                    "x": rect.left,
+                    "y": rect.top,
+                    "width": rect.right - rect.left,
+                    "height": rect.bottom - rect.top
+                },
+                "dpi": GetDpiForWindow(hwnd),
+                "minimized": IsIconic(hwnd).as_bool(),
+                "foreground": GetForegroundWindow() == hwnd,
+                "controllable": blocked_code.is_none(),
+                "blockedReason": blocked_reason,
+                "blockedCode": blocked_code
+            })
+        }
+    }
+
+    fn is_blocked_target(process_name: &str, title: &str) -> bool {
+        let process = process_name.trim().to_ascii_lowercase();
+        let title = title.to_ascii_lowercase();
         [
             "grox",
-            "grok build",
+            "grox-desktop",
+            "grok build desktop",
+            "grok-build-desktop",
+            "chatgpt",
             "powershell",
-            "command prompt",
-            "windows terminal",
-            "windows security",
-            "user account control",
-            "uac",
+            "pwsh",
+            "cmd",
+            "windowsterminal",
+            "wt",
+            "conhost",
         ]
         .iter()
-        .any(|needle| lower.contains(needle))
+        .any(|value| process == *value)
+            || [
+                "grox",
+                "grok build desktop",
+                "windows security",
+                "user account control",
+                "用户账户控制",
+                "windows 安全",
+            ]
+            .iter()
+            .any(|value| title.contains(value))
+    }
+
+    unsafe fn process_path(process_id: u32) -> Option<String> {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut buffer = vec![0u16; 32_768];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+        .ok()
+        .map(|_| String::from_utf16_lossy(&buffer[..size as usize]));
+        let _ = CloseHandle(process);
+        result
+    }
+
+    unsafe fn is_process_elevated(process_id: u32) -> bool {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) else {
+            return false;
+        };
+        let mut token = Default::default();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+            let _ = CloseHandle(process);
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut returned = 0;
+        let elevated = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+        .is_ok()
+            && elevation.TokenIsElevated != 0;
+        let _ = CloseHandle(token);
+        let _ = CloseHandle(process);
+        elevated
     }
 
     pub fn activate(hwnd: i64) -> Result<(), String> {
         unsafe {
             let handle = HWND(hwnd as *mut _);
-            if handle.0.is_null() {
-                return Err("无效窗口句柄".into());
+            if handle.0.is_null() || !IsWindow(handle).as_bool() {
+                return Err("目标窗口不存在".into());
+            }
+            let mut buffer = [0u16; 512];
+            let len = GetWindowTextW(handle, &mut buffer);
+            let info = window_info(
+                handle,
+                String::from_utf16_lossy(&buffer[..len as usize])
+                    .trim()
+                    .to_string(),
+            );
+            if info.get("controllable").and_then(Value::as_bool) != Some(true) {
+                let code = info
+                    .get("blockedCode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("blocklist");
+                return Err(if code == "elevated" {
+                    "elevation-blocked: 目标以管理员权限运行，无法控制。请用普通权限重新启动目标程序，或以管理员身份启动 Grox 后重试；Grox 不会自行提权".into()
+                } else {
+                    "blocklist: 该应用位于 Computer Use 不可控制清单".into()
+                });
             }
             let _ = ShowWindow(handle, SW_RESTORE);
-            if SetForegroundWindow(handle).as_bool() {
-                Ok(())
+            for attempt in 0..3 {
+                if GetForegroundWindow() == handle {
+                    return Ok(());
+                }
+                let foreground = GetForegroundWindow();
+                let current_thread = GetCurrentThreadId();
+                let target_thread = GetWindowThreadProcessId(handle, None);
+                let foreground_thread = if foreground.0.is_null() {
+                    0
+                } else {
+                    GetWindowThreadProcessId(foreground, None)
+                };
+                let attached_foreground = foreground_thread != 0
+                    && foreground_thread != current_thread
+                    && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+                let attached_target = target_thread != 0
+                    && target_thread != current_thread
+                    && AttachThreadInput(current_thread, target_thread, true).as_bool();
+                let _ = BringWindowToTop(handle);
+                let _ = SetForegroundWindow(handle);
+                let _ = SetFocus(handle);
+                if attached_target {
+                    let _ = AttachThreadInput(current_thread, target_thread, false);
+                }
+                if attached_foreground {
+                    let _ = AttachThreadInput(current_thread, foreground_thread, false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120 + attempt * 80));
+            }
+            let foreground = GetForegroundWindow();
+            let mut foreground_title = [0u16; 512];
+            let foreground_length = GetWindowTextW(foreground, &mut foreground_title);
+            let foreground_title =
+                String::from_utf16_lossy(&foreground_title[..foreground_length as usize])
+                    .to_ascii_lowercase();
+            if [
+                "user account control",
+                "用户账户控制",
+                "windows security",
+                "windows 安全",
+            ]
+            .iter()
+            .any(|value| foreground_title.contains(value))
+            {
+                Err("uac-handoff: 请由用户手动完成 Windows UAC 或安全确认，然后回到 Grox 调用 resume".into())
             } else {
-                Err("无法激活窗口".into())
+                Err("Windows 拒绝将目标窗口置于前台".into())
             }
         }
     }
 
     pub fn window_state(hwnd: i64) -> Result<WindowState, String> {
         activate(hwnd)?;
-        let capture = screenshot()?;
+        let handle = HWND(hwnd as *mut _);
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(handle, &mut rect).map_err(|error| error.to_string())? };
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return Err("目标窗口尺寸无效".into());
+        }
+        let capture = capture_rect(rect.left, rect.top, width, height)?;
         let mut elements = Vec::new();
+        ELEMENTS.with(|values| values.borrow_mut().clear());
         if let Ok(automation) = UIAutomation::new() {
             if let Ok(root) = automation.element_from_handle(Handle::from(hwnd as isize)) {
                 if let Ok(walker) = automation.get_control_view_walker() {
-                    collect_elements(&walker, &root, &mut elements, 0);
+                    collect_elements(&walker, &root, &mut elements, rect, 0);
                 }
             }
         }
+        let mut title_buffer = [0u16; 512];
+        let title_length = unsafe { GetWindowTextW(handle, &mut title_buffer) };
+        let window = window_info(
+            handle,
+            String::from_utf16_lossy(&title_buffer[..title_length as usize])
+                .trim()
+                .to_string(),
+        );
         Ok(WindowState {
             png: capture.png,
             elements,
+            width,
+            height,
+            window,
+            tree_truncated: ELEMENTS.with(|values| values.borrow().len() >= 240),
         })
     }
 
@@ -496,6 +1011,7 @@ mod platform {
         walker: &uiautomation::UITreeWalker,
         element: &uiautomation::UIElement,
         out: &mut Vec<serde_json::Value>,
+        window: RECT,
         depth: usize,
     ) {
         if out.len() >= 240 || depth > 12 {
@@ -508,18 +1024,42 @@ mod platform {
                 .map(|v| format!("{v:?}"))
                 .unwrap_or_default();
             if rect.get_right() > rect.get_left() && rect.get_bottom() > rect.get_top() {
+                let element_id = format!("e{}", out.len() + 1);
+                let value_pattern = element.get_pattern::<UIValuePattern>().ok();
+                let mut patterns = Vec::new();
+                if element.get_pattern::<UIInvokePattern>().is_ok() {
+                    patterns.push("Invoke");
+                }
+                if value_pattern.is_some() {
+                    patterns.push("Value");
+                }
+                if element.get_pattern::<UIScrollItemPattern>().is_ok() {
+                    patterns.push("ScrollItem");
+                }
+                ELEMENTS.with(|values| {
+                    values
+                        .borrow_mut()
+                        .insert(element_id.clone(), element.clone());
+                });
                 out.push(serde_json::json!({
-                    "elementId": format!("e{}", out.len() + 1),
+                    "elementId": element_id,
                     "name": name,
                     "controlType": control_type,
-                    "bounds": {"x": rect.get_left(), "y": rect.get_top(), "width": rect.get_right() - rect.get_left(), "height": rect.get_bottom() - rect.get_top()},
-                    "enabled": element.is_enabled().unwrap_or(false)
+                    "value": value_pattern.and_then(|pattern| pattern.get_value().ok()),
+                    "bounds": {
+                        "x": rect.get_left() - window.left,
+                        "y": rect.get_top() - window.top,
+                        "width": rect.get_right() - rect.get_left(),
+                        "height": rect.get_bottom() - rect.get_top()
+                    },
+                    "enabled": element.is_enabled().unwrap_or(false),
+                    "patterns": patterns
                 }));
             }
         }
         if let Ok(mut child) = walker.get_first_child(element) {
             loop {
-                collect_elements(walker, &child, out, depth + 1);
+                collect_elements(walker, &child, out, window, depth + 1);
                 match walker.get_next_sibling(&child) {
                     Ok(next) => child = next,
                     Err(_) => break,
@@ -531,27 +1071,59 @@ mod platform {
         }
     }
 
-    pub fn set_value(args: &serde_json::Value) -> Result<(), String> {
-        let _ = args
-            .get("elementId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("缺少 elementId")?;
-        type_text(
-            args.get("value")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("缺少 value")?,
-        )
+    pub fn set_value(hwnd: i64, element_id: &str, value: &str) -> Result<(), String> {
+        ensure_target_foreground(hwnd)?;
+        let element = find_element(element_id)?;
+        let pattern = element
+            .get_pattern::<UIValuePattern>()
+            .map_err(|_| "目标不支持 ValuePattern；请重新观察并使用点击后输入".to_string())?;
+        if pattern.is_readonly().unwrap_or(true) {
+            return Err("目标 ValuePattern 为只读".into());
+        }
+        pattern.set_value(value).map_err(|error| error.to_string())
     }
 
-    pub fn screenshot() -> Result<Capture, String> {
+    fn find_element(element_id: &str) -> Result<UIElement, String> {
+        ELEMENTS.with(|values| {
+            values
+                .borrow()
+                .get(element_id)
+                .cloned()
+                .ok_or_else(|| "elementId 不属于当前界面状态；请重新观察".to_string())
+        })
+    }
+
+    pub fn target_point(
+        hwnd: i64,
+        element_id: Option<&str>,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<(i32, i32), String> {
+        if let Some(element_id) = element_id {
+            let element = find_element(element_id)?;
+            let bounds = element
+                .get_bounding_rectangle()
+                .map_err(|error| error.to_string())?;
+            let window = window_rect(hwnd)?;
+            return Ok(clamp_local_point(
+                window,
+                bounds.get_left() - window.left + (bounds.get_right() - bounds.get_left()) / 2,
+                bounds.get_top() - window.top + (bounds.get_bottom() - bounds.get_top()) / 2,
+            ));
+        }
+        let window = window_rect(hwnd)?;
+        Ok(clamp_local_point(
+            window,
+            x.unwrap_or((window.right - window.left) / 2),
+            y.unwrap_or((window.bottom - window.top) / 2),
+        ))
+    }
+
+    fn capture_rect(x: i32, y: i32, width: i32, height: i32) -> Result<Capture, String> {
+        if width <= 0 || height <= 0 {
+            return Err("无法读取截图区域尺寸".into());
+        }
         unsafe {
-            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if width <= 0 || height <= 0 {
-                return Err("无法读取屏幕尺寸".into());
-            }
             let screen = GetDC(HWND::default());
             let memory = CreateCompatibleDC(screen);
             let bitmap = CreateCompatibleBitmap(screen, width, height);
@@ -607,21 +1179,19 @@ mod platform {
                 .write_to(&mut png, ImageFormat::Png)
                 .map_err(|error| error.to_string())?;
             Ok(Capture {
-                width,
-                height,
                 png: png.into_inner(),
             })
         }
     }
 
-    pub fn move_mouse(x: i32, y: i32) -> Result<(), String> {
-        ensure_safe_foreground()?;
-        unsafe { SetCursorPos(x, y).map_err(|error| error.to_string()) }
+    pub fn move_mouse(hwnd: i64, x: i32, y: i32) -> Result<(), String> {
+        ensure_target_foreground(hwnd)?;
+        let (screen_x, screen_y) = to_screen_point(hwnd, x, y)?;
+        unsafe { SetCursorPos(screen_x, screen_y).map_err(|error| error.to_string()) }
     }
 
-    pub fn click(x: i32, y: i32, button: &str, clicks: u32) -> Result<(), String> {
-        ensure_safe_foreground()?;
-        move_mouse(x, y)?;
+    pub fn click(hwnd: i64, x: i32, y: i32, button: &str, clicks: u32) -> Result<(), String> {
+        move_mouse(hwnd, x, y)?;
         let (down, up) = match button {
             "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
             "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
@@ -635,18 +1205,23 @@ mod platform {
     }
 
     pub fn drag(
+        hwnd: i64,
         from_x: i32,
         from_y: i32,
         to_x: i32,
         to_y: i32,
         duration_ms: u64,
     ) -> Result<(), String> {
-        move_mouse(from_x, from_y)?;
+        let window = window_rect(hwnd)?;
+        let (from_x, from_y) = clamp_local_point(window, from_x, from_y);
+        let (to_x, to_y) = clamp_local_point(window, to_x, to_y);
+        move_mouse(hwnd, from_x, from_y)?;
         mouse(MOUSEEVENTF_LEFTDOWN, 0)?;
         let steps = (duration_ms / 16).clamp(1, 120);
         for step in 1..=steps {
             let t = step as f64 / steps as f64;
             move_mouse(
+                hwnd,
                 from_x + ((to_x - from_x) as f64 * t) as i32,
                 from_y + ((to_y - from_y) as f64 * t) as i32,
             )?;
@@ -655,10 +1230,35 @@ mod platform {
         mouse(MOUSEEVENTF_LEFTUP, 0)
     }
 
-    pub fn scroll(x: i32, y: i32, delta: i32) -> Result<(), String> {
-        ensure_safe_foreground()?;
-        move_mouse(x, y)?;
-        mouse(MOUSEEVENTF_WHEEL, delta as u32)
+    pub fn scroll(
+        hwnd: i64,
+        element_id: Option<&str>,
+        x: Option<i32>,
+        y: Option<i32>,
+        delta_x: i32,
+        delta_y: i32,
+    ) -> Result<(), String> {
+        if let Some(element_id) = element_id {
+            if let Ok(pattern) = find_element(element_id).and_then(|element| {
+                element
+                    .get_pattern::<UIScrollItemPattern>()
+                    .map_err(|error| error.to_string())
+            }) {
+                ensure_target_foreground(hwnd)?;
+                return pattern
+                    .scroll_into_view()
+                    .map_err(|error| error.to_string());
+            }
+        }
+        let (x, y) = target_point(hwnd, element_id, x, y)?;
+        move_mouse(hwnd, x, y)?;
+        if delta_y != 0 {
+            mouse(MOUSEEVENTF_WHEEL, delta_y as u32)?;
+        }
+        if delta_x != 0 {
+            mouse(MOUSEEVENTF_HWHEEL, delta_x as u32)?;
+        }
+        Ok(())
     }
 
     fn mouse(flags: MOUSE_EVENT_FLAGS, data: u32) -> Result<(), String> {
@@ -675,12 +1275,24 @@ mod platform {
         send(&[input])
     }
 
-    pub fn key(keys: &[&str]) -> Result<(), String> {
-        ensure_safe_foreground()?;
-        let virtual_keys = keys
-            .iter()
-            .map(|key| vk(key))
-            .collect::<Result<Vec<_>, _>>()?;
+    pub fn key(hwnd: i64, keys: &[&str]) -> Result<(), String> {
+        ensure_target_foreground(hwnd)?;
+        let mut virtual_keys = Vec::new();
+        for name in keys {
+            let (key, modifiers) = vk(name)?;
+            if modifiers & 2 != 0 && !virtual_keys.contains(&VK_CONTROL) {
+                virtual_keys.push(VK_CONTROL);
+            }
+            if modifiers & 4 != 0 && !virtual_keys.contains(&VK_MENU) {
+                virtual_keys.push(VK_MENU);
+            }
+            if modifiers & 1 != 0 && !virtual_keys.contains(&VK_SHIFT) {
+                virtual_keys.push(VK_SHIFT);
+            }
+            if !virtual_keys.contains(&key) {
+                virtual_keys.push(key);
+            }
+        }
         let mut inputs = Vec::with_capacity(virtual_keys.len() * 2);
         for key in &virtual_keys {
             inputs.push(key_input(*key, false));
@@ -691,8 +1303,8 @@ mod platform {
         send(&inputs)
     }
 
-    pub fn type_text(text: &str) -> Result<(), String> {
-        ensure_safe_foreground()?;
+    pub fn type_text(hwnd: i64, text: &str) -> Result<(), String> {
+        ensure_target_foreground(hwnd)?;
         let mut inputs = Vec::new();
         for unit in text.encode_utf16() {
             inputs.push(unicode_input(unit, false));
@@ -748,35 +1360,45 @@ mod platform {
         }
     }
 
-    fn ensure_safe_foreground() -> Result<(), String> {
+    fn window_rect(hwnd: i64) -> Result<RECT, String> {
         unsafe {
-            let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
-            if hwnd.0.is_null() {
-                return Err("当前没有可控的前台窗口".into());
+            let handle = HWND(hwnd as *mut _);
+            if handle.0.is_null() || !IsWindow(handle).as_bool() {
+                return Err("目标窗口不存在".into());
             }
-            let mut buffer = [0u16; 512];
-            let length = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut buffer);
-            let title = String::from_utf16_lossy(&buffer[..length as usize]).to_ascii_lowercase();
-            let blocked = [
-                "grox",
-                "grok build",
-                "powershell",
-                "command prompt",
-                "windows terminal",
-                "windows security",
-                "user account control",
-                "uac",
-            ];
-            if blocked.iter().any(|value| title.contains(value)) {
-                return Err(
-                    "出于安全原因，Computer Use 不控制 Grox、终端或 Windows 安全窗口".into(),
-                );
+            let mut rect = RECT::default();
+            GetWindowRect(handle, &mut rect).map_err(|error| error.to_string())?;
+            if rect.right <= rect.left || rect.bottom <= rect.top {
+                return Err("目标窗口尺寸无效".into());
             }
-            Ok(())
+            Ok(rect)
         }
     }
 
-    fn vk(name: &str) -> Result<VIRTUAL_KEY, String> {
+    fn clamp_local_point(window: RECT, x: i32, y: i32) -> (i32, i32) {
+        super::clamp_window_point(window.right - window.left, window.bottom - window.top, x, y)
+    }
+
+    fn to_screen_point(hwnd: i64, x: i32, y: i32) -> Result<(i32, i32), String> {
+        let window = window_rect(hwnd)?;
+        let (x, y) = clamp_local_point(window, x, y);
+        Ok((window.left + x, window.top + y))
+    }
+
+    fn ensure_target_foreground(hwnd: i64) -> Result<(), String> {
+        let handle = HWND(hwnd as *mut _);
+        let _ = window_rect(hwnd)?;
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground != handle {
+            return Err(
+                "目标窗口已不在前台；为避免控制错误应用，请重新调用 activate_window 或 get_window_state"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn vk(name: &str) -> Result<(VIRTUAL_KEY, u8), String> {
         let upper = name.trim().to_ascii_uppercase();
         let key = match upper.as_str() {
             "CTRL" | "CONTROL" => VK_CONTROL,
@@ -809,21 +1431,33 @@ mod platform {
             "F10" => VK_F10,
             "F11" => VK_F11,
             "F12" => VK_F12,
-            _ if upper.len() == 1 => VIRTUAL_KEY(upper.as_bytes()[0] as u16),
-            _ => return Err(format!("不支持的按键：{name}")),
+            _ => {
+                let mut characters = name.chars();
+                let Some(character) = characters.next() else {
+                    return Err("缺少按键".into());
+                };
+                if characters.next().is_some() {
+                    return Err(format!("不支持的按键：{name}"));
+                }
+                let translated = unsafe { VkKeyScanW(character as u16) };
+                if translated == -1 {
+                    return Err(format!("当前 Windows 键盘布局不支持按键：{name}"));
+                }
+                return Ok((
+                    VIRTUAL_KEY((translated as u16 & 0xff) as u16),
+                    ((translated as u16 >> 8) & 0x07) as u8,
+                ));
+            }
         };
-        Ok(key)
+        Ok((key, 0))
     }
 }
 
 #[cfg(not(windows))]
 mod platform {
-    use super::{Capture, WindowState};
+    use super::WindowState;
     fn unsupported<T>() -> Result<T, String> {
         Err("当前 computer use 执行器仅支持 Windows".into())
-    }
-    pub fn screenshot() -> Result<Capture, String> {
-        unsupported()
     }
     pub fn list_windows() -> Result<Vec<serde_json::Value>, String> {
         unsupported()
@@ -834,25 +1468,117 @@ mod platform {
     pub fn window_state(_: i64) -> Result<WindowState, String> {
         unsupported()
     }
-    pub fn set_value(_: &serde_json::Value) -> Result<(), String> {
+    pub fn set_value(_: i64, _: &str, _: &str) -> Result<(), String> {
         unsupported()
     }
-    pub fn move_mouse(_: i32, _: i32) -> Result<(), String> {
+    pub fn target_point(
+        _: i64,
+        _: Option<&str>,
+        _: Option<i32>,
+        _: Option<i32>,
+    ) -> Result<(i32, i32), String> {
         unsupported()
     }
-    pub fn click(_: i32, _: i32, _: &str, _: u32) -> Result<(), String> {
+    pub fn move_mouse(_: i64, _: i32, _: i32) -> Result<(), String> {
         unsupported()
     }
-    pub fn drag(_: i32, _: i32, _: i32, _: i32, _: u64) -> Result<(), String> {
+    pub fn click(_: i64, _: i32, _: i32, _: &str, _: u32) -> Result<(), String> {
         unsupported()
     }
-    pub fn scroll(_: i32, _: i32, _: i32) -> Result<(), String> {
+    pub fn drag(_: i64, _: i32, _: i32, _: i32, _: i32, _: u64) -> Result<(), String> {
         unsupported()
     }
-    pub fn key(_: &[&str]) -> Result<(), String> {
+    pub fn scroll(
+        _: i64,
+        _: Option<&str>,
+        _: Option<i32>,
+        _: Option<i32>,
+        _: i32,
+        _: i32,
+    ) -> Result<(), String> {
         unsupported()
     }
-    pub fn type_text(_: &str) -> Result<(), String> {
+    pub fn key(_: i64, _: &[&str]) -> Result<(), String> {
         unsupported()
+    }
+    pub fn type_text(_: i64, _: &str) -> Result<(), String> {
+        unsupported()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_schemas_are_specific_and_stateful() {
+        let listed = tools();
+        let click = listed
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("click"))
+            .expect("click tool");
+        let schema = click.get("inputSchema").expect("click schema");
+        assert!(schema["properties"].get("stateId").is_some());
+        assert!(schema["properties"].get("elementId").is_some());
+        assert!(schema["properties"].get("text").is_none());
+
+        let scroll = listed
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("scroll"))
+            .expect("scroll tool");
+        assert!(scroll["inputSchema"]["properties"].get("deltaX").is_some());
+        assert!(scroll["inputSchema"]["properties"].get("deltaY").is_some());
+    }
+
+    #[test]
+    fn emergency_stop_is_sticky_for_the_mcp_process() {
+        let mut state = ComputerState::default();
+        call_tool_inner("stop", &json!({}), &mut state).expect("stop succeeds");
+        let error = call_tool_inner("start", &json!({"windowId": 1}), &mut state)
+            .expect_err("start must remain blocked");
+        assert!(error.contains("必须由用户重新创建或加载会话"));
+    }
+
+    #[test]
+    fn pause_blocks_actions_until_resume_or_stop() {
+        let mut state = ComputerState {
+            active_window: Some(1),
+            ..ComputerState::default()
+        };
+        call_tool_inner("pause", &json!({}), &mut state).expect("pause succeeds");
+        let error = call_tool_inner("get_window_state", &json!({}), &mut state)
+            .expect_err("observation must stay paused");
+        assert!(error.contains("已暂停"));
+    }
+
+    #[test]
+    fn window_coordinates_are_clamped_to_the_selected_window() {
+        assert_eq!(clamp_window_point(800, 600, -50, 900), (0, 599));
+        assert_eq!(clamp_window_point(800, 600, 120, 300), (120, 300));
+    }
+
+    #[test]
+    fn elevation_and_uac_failures_remain_machine_readable() {
+        let elevated: Value =
+            serde_json::from_str(&classified_error("elevation-blocked: 管理员窗口"))
+                .expect("structured elevation error");
+        assert_eq!(elevated["errorCode"], "elevation-blocked");
+        let uac: Value = serde_json::from_str(&classified_error("uac-handoff: 等待用户确认"))
+            .expect("structured UAC error");
+        assert_eq!(uac["errorCode"], "uac-handoff");
+    }
+
+    #[test]
+    fn emergency_stop_marker_round_trips_for_a_lease() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let lease_id = format!("{nonce:032x}");
+        clear_emergency_stop(&lease_id).expect("clean test lease");
+        mark_emergency_stop(&lease_id).expect("mark emergency stop");
+        assert!(emergency_stop_requested(&lease_id));
+        clear_emergency_stop(&lease_id).expect("clear emergency stop");
+        assert!(!emergency_stop_requested(&lease_id));
     }
 }

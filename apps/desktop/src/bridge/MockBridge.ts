@@ -313,6 +313,10 @@ export class MockBridge implements GrokBridge {
     });
   }
 
+  async emergencyStopComputer(sessionId: string): Promise<void> {
+    this.cancel(sessionId);
+  }
+
   async rewind(sessionId: string, targetPromptIndex: number, mode: RewindMode, force: boolean): Promise<RewindResult> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error("会话不存在");

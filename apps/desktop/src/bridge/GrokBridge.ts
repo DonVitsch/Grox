@@ -89,6 +89,9 @@ export interface GrokBridge {
   /** ACP: session/cancel — abort the in-flight turn. */
   cancel(sessionId: string): void;
 
+  /** Sticky Computer Use emergency stop plus ACP turn cancellation. */
+  emergencyStopComputer(sessionId: string): Promise<void>;
+
   /** Compact the active conversation context. */
   compact(sessionId: string): Promise<void>;
 

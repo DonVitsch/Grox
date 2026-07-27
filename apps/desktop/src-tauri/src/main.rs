@@ -185,6 +185,7 @@ struct MediaGenerationResult {
 struct ComputerSessionExtensions {
     mcp_servers: Vec<serde_json::Value>,
     plugin_dirs: Vec<String>,
+    lease_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2211,7 +2212,7 @@ fn ensure_computer_plugin() -> Result<PathBuf, String> {
     fs::create_dir_all(&skill).map_err(|error| format!("无法创建 Computer Use Skill：{error}"))?;
     fs::write(
         root.join("plugin.json"),
-        r#"{"name":"grox-desktop-computer-use","version":"0.1.0","description":"Grox Windows foreground Computer Use harness"}"#,
+        r#"{"name":"grox-desktop-computer-use","version":"0.3.1","description":"Grox Windows foreground Computer Use harness"}"#,
     )
     .map_err(|error| format!("无法写入 Computer Use Plugin：{error}"))?;
     fs::write(
@@ -2223,7 +2224,7 @@ description: Use Grox's experimental Windows foreground Computer Use harness onl
 
 # Grox Computer Use
 
-Use only the grok_desktop_computer MCP tools for an explicit `/computer` or `@Computer` request. Start with `list_apps`/`list_windows`, select an exact window with `start`, then repeat `get_window_state` → one action → `get_window_state`. Every state-changing action must use the latest `stateId`; stale state must be rejected. Prefer UI Automation `elementId`/`set_value` when available. Never control Grox, terminals, UAC, Windows Security, elevated windows, or the secure desktop. Use `stop` immediately when the user asks.
+Use only the grok_desktop_computer MCP tools for an explicit `/computer` or `@Computer` request. Start with `list_apps`/`list_windows`, select an exact controllable window with `start`, then repeat observation → exactly one action → observation. Every state-changing action must use the latest `stateId`; stale state must be rejected. Screenshot and element coordinates are local to the selected window and are clamped to that window. Prefer UI Automation `elementId` and `set_value` when available. Use `deltaX` for horizontal scrolling and `deltaY` for vertical scrolling. Never control Grox, terminals, UAC, Windows Security, a higher-integrity window, or the secure desktop. A permanent `elevation-blocked` result cannot be resumed; ask the user to restart the target without administrator privileges or run Grox at matching integrity. Use `stop` immediately when the user asks. Emergency stop is sticky: the agent must not attempt `start` again, and only an explicit user reload/new session may re-arm control.
 "#,
     )
     .map_err(|error| format!("无法写入 Computer Use Skill：{error}"))?;
@@ -2235,15 +2236,68 @@ fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
     let plugin = ensure_computer_plugin()?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("无法定位 Grox computer use 执行器：{error}"))?;
+    let mut lease_bytes = [0_u8; 16];
+    getrandom::fill(&mut lease_bytes)
+        .map_err(|error| format!("无法创建 Computer Use 租约：{error}"))?;
+    let lease_id = lease_bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    computer_mcp::clear_emergency_stop(&lease_id)?;
     Ok(ComputerSessionExtensions {
         mcp_servers: vec![serde_json::json!({
             "type": "stdio",
             "name": "grok_desktop_computer",
             "command": executable,
-            "args": ["--computer-mcp"]
+            "args": ["--computer-mcp", "--computer-lease", lease_id]
         })],
         plugin_dirs: vec![path_for_webview(&plugin)],
+        lease_id,
     })
+}
+
+#[tauri::command]
+fn computer_emergency_stop(lease_id: String) -> Result<(), String> {
+    computer_mcp::mark_emergency_stop(&lease_id)
+}
+
+#[tauri::command]
+fn computer_clear_emergency_stop(lease_id: String) -> Result<(), String> {
+    computer_mcp::clear_emergency_stop(&lease_id)
+}
+
+#[cfg(windows)]
+fn register_computer_emergency_shortcut(app: tauri::AppHandle) {
+    std::thread::spawn(move || unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::{
+            Input::KeyboardAndMouse::{
+                RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
+                MOD_NOREPEAT, VK_ESCAPE,
+            },
+            WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY},
+        };
+
+        const HOTKEY_ID: i32 = 0x4752;
+        let modifiers = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_CONTROL.0 | MOD_NOREPEAT.0);
+        if RegisterHotKey(HWND::default(), HOTKEY_ID, modifiers, VK_ESCAPE.0 as u32).is_err() {
+            let _ = app.emit("computer-emergency-shortcut-status", false);
+            return;
+        }
+        let _ = app.emit("computer-emergency-shortcut-status", true);
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, HWND::default(), 0, 0).0 > 0 {
+            if message.message == WM_HOTKEY && message.wParam.0 == HOTKEY_ID as usize {
+                let _ = app.emit("computer-emergency-shortcut", ());
+            }
+        }
+        let _ = UnregisterHotKey(HWND::default(), HOTKEY_ID);
+    });
+}
+
+#[cfg(not(windows))]
+fn register_computer_emergency_shortcut(app: tauri::AppHandle) {
+    let _ = app.emit("computer-emergency-shortcut-status", false);
 }
 
 #[tauri::command]
@@ -3016,8 +3070,16 @@ async fn install_update(app: tauri::AppHandle, version: String) -> Result<(), St
 }
 
 fn main() {
-    if std::env::args().any(|argument| argument == "--computer-mcp") {
-        if let Err(error) = computer_mcp::run() {
+    let process_args = std::env::args().collect::<Vec<_>>();
+    if process_args
+        .iter()
+        .any(|argument| argument == "--computer-mcp")
+    {
+        let lease_id = process_args
+            .windows(2)
+            .find(|pair| pair[0] == "--computer-lease")
+            .map(|pair| pair[1].clone());
+        if let Err(error) = computer_mcp::run(lease_id) {
             eprintln!("grox-computer-mcp: {error}");
             std::process::exit(1);
         }
@@ -3032,6 +3094,7 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(icon)?;
             }
+            register_computer_emergency_shortcut(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3065,6 +3128,8 @@ fn main() {
             open_external,
             start_project_preview,
             computer_session_extensions,
+            computer_emergency_stop,
+            computer_clear_emergency_stop,
             save_media_reference,
             generate_media,
             acp_spawn,
