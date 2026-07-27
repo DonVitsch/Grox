@@ -116,6 +116,47 @@ export interface SlashCommand {
   name: string;
   description: string;
   inputHint?: string;
+  tag?: string;
+}
+
+export interface WorkflowPhase {
+  title: string;
+  state: "pending" | "active" | "done";
+}
+
+export interface WorkflowAgent {
+  agentId: string;
+  label: string;
+  phase?: string;
+  model?: string;
+  state: string;
+  tokensUsed?: number;
+  durationMs?: number;
+}
+
+export interface WorkflowRun {
+  runId: string;
+  revision: number;
+  name: string;
+  objective: string;
+  status: string;
+  foreground: boolean;
+  phases: WorkflowPhase[];
+  currentPhase?: string;
+  agentBudget?: number;
+  agentsUsed: number;
+  agentsReserved: number;
+  agentsRemaining?: number;
+  agentUsageIncomplete: boolean;
+  elapsedMs: number;
+  activeAgents: number;
+  currentAgentLabel?: string;
+  agents: WorkflowAgent[];
+  lastEvent?: string;
+  lastEventDetail?: string;
+  lastEventTimestamp?: string;
+  pauseMessage?: string;
+  resultSummary?: string;
 }
 
 export interface QuestionOption {
@@ -378,6 +419,7 @@ export type BridgeEvent =
   | { type: "model_state"; state: ModelState }
   | { type: "mode_state"; sessionId: string; mode: AgentMode }
   | { type: "available_commands"; sessionId: string; commands: SlashCommand[] }
+  | { type: "workflow_update"; sessionId: string; workflow: WorkflowRun }
   | { type: "session_ready"; session: Session }
   | { type: "session_meta"; sessionId: string; patch: Partial<SessionMeta> }
   | { type: "block_add"; sessionId: string; block: SessionBlock }

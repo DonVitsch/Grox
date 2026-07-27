@@ -27,6 +27,7 @@ interface SlashCmd {
   hint: string;
   run: () => void;
   source?: "gui" | "runtime";
+  tag?: string;
 }
 
 const NO_RUNTIME_COMMANDS: SlashCommand[] = [];
@@ -71,6 +72,7 @@ export function Composer() {
 
   const running =
     status === "running" || status === "awaiting_permission" || status === "awaiting_input";
+  const deepResearchAvailable = runtimeCommands.some((command) => command.name === "deep-research");
 
   const slashCommands: SlashCmd[] = [
     { id: "/plan", hint: language === "zh-CN" ? "计划模式 — 操作前先规划" : "plan mode — think before acting", run: () => setMode("plan") },
@@ -117,8 +119,11 @@ export function Composer() {
       .filter((command) => !localIds.has(`/${command.name}`))
       .map((command) => ({
         id: `/${command.name}`,
-        hint: command.description || command.inputHint || (language === "zh-CN" ? "由 Grok Runtime 提供" : "Provided by Grok Runtime"),
+        hint: command.name === "deep-research" && language === "zh-CN"
+          ? "深度研究 — 并行检索、独立核验并生成带引用报告"
+          : command.description || command.inputHint || (language === "zh-CN" ? "由 Grok Runtime 提供" : "Provided by Grok Runtime"),
         source: "runtime" as const,
+        tag: command.tag ?? (command.name === "deep-research" ? "NEW" : undefined),
         run: () => {
           setText(`/${command.name}${command.inputHint ? " " : ""}`);
           requestAnimationFrame(() => taRef.current?.focus());
@@ -129,6 +134,10 @@ export function Composer() {
   const slashOpen = text.startsWith("/") && !text.includes(" ");
   const query = slashOpen ? text.slice(1).toLowerCase() : "";
   const matches = slashOpen ? commands.filter((c) => c.id.slice(1).toLowerCase().startsWith(query)) : [];
+  const chooseSlashCommand = (command: SlashCmd) => {
+    command.run();
+    if (command.source !== "runtime") setText("");
+  };
 
   useEffect(() => setSlashIdx(0), [query]);
 
@@ -204,8 +213,7 @@ export function Composer() {
       }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault();
-        matches[Math.min(slashIdx, matches.length - 1)].run();
-        setText("");
+        chooseSlashCommand(matches[Math.min(slashIdx, matches.length - 1)]);
         return;
       }
       if (e.key === "Escape") {
@@ -232,8 +240,7 @@ export function Composer() {
                 key={c.id}
                 onMouseEnter={() => setSlashIdx(i)}
                 onClick={() => {
-                  c.run();
-                  setText("");
+                  chooseSlashCommand(c);
                 }}
                 className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${
                   i === slashIdx ? "bg-high" : ""
@@ -241,6 +248,7 @@ export function Composer() {
               >
                 <span className="w-20 shrink-0 font-mono text-[11px] text-acc">{c.id}</span>
                 <span className="min-w-0 flex-1 truncate text-[11px] text-mute">{c.hint}</span>
+                {c.tag && <span className="rounded-[3px] bg-acc/10 px-1.5 py-0.5 font-mono text-[8.5px] tracking-[0.08em] text-acc">{c.tag}</span>}
                 {c.source === "runtime" && <span className="rounded-[3px] border border-line2 px-1.5 py-0.5 font-mono text-[8.5px] tracking-[0.08em] text-faint">RUNTIME</span>}
               </button>
             ))}
@@ -303,6 +311,19 @@ export function Composer() {
             />
 
             <PromptOptionsMenu mode={mode} effort={effort} permissionMode={permissionMode} onMode={setMode} onEffort={setEffort} onPermission={setPermissionMode} />
+
+            {deepResearchAvailable && <button
+              onClick={() => {
+                setText("/deep-research ");
+                requestAnimationFrame(() => taRef.current?.focus());
+              }}
+              disabled={running}
+              title={language === "zh-CN" ? "启动 Deep Research" : "Start Deep Research"}
+              className="flex h-7 items-center gap-1.5 rounded-[5px] border border-acc/30 bg-acc/5 px-2 font-mono text-[9.5px] text-acc transition-colors hover:border-acc/60 hover:bg-acc/10 disabled:opacity-40"
+            >
+              <Icon name="search" size={11} />
+              {language === "zh-CN" ? "深度研究" : "RESEARCH"}
+            </button>}
 
             <button
               onClick={() => fileRef.current?.click()}

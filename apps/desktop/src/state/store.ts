@@ -38,11 +38,15 @@ import type {
   RewindPoint,
   RewindResult,
   SlashCommand,
+  WorkflowRun,
 } from "../bridge/types";
 import { DEMO_CWD } from "../demo/data";
 
 export type View = "home" | "session";
 export type InspectorTab = "files" | "tasks" | "preview" | "usage";
+
+const isWorkflowTerminal = (status: string) =>
+  ["complete", "failed", "cancelled", "interrupted"].includes(status);
 
 export interface ProjectMeta {
   id: string;
@@ -102,6 +106,7 @@ interface DesktopState {
   previewError: string | null;
   planPreviewOpen: boolean;
   slashCommands: Record<string, SlashCommand[]>;
+  workflows: Record<string, WorkflowRun[]>;
 
   model: string;
   models: ModelInfo[];
@@ -477,6 +482,18 @@ export const useDesktop = create<DesktopState>((set, get) => {
       case "available_commands":
         set({ slashCommands: { ...get().slashCommands, [e.sessionId]: e.commands } });
         break;
+      case "workflow_update": {
+        const state = get();
+        const current = state.workflows[e.sessionId] ?? [];
+        const previous = current.find((run) => run.runId === e.workflow.runId);
+        if (previous && previous.revision > e.workflow.revision) break;
+        const next = e.workflow.status === "cleared"
+          ? current.filter((run) => run.runId !== e.workflow.runId)
+          : [...current.filter((run) => run.runId !== e.workflow.runId), e.workflow]
+              .sort((a, b) => Number(isWorkflowTerminal(a.status)) - Number(isWorkflowTerminal(b.status)));
+        set({ workflows: { ...state.workflows, [e.sessionId]: next } });
+        break;
+      }
       case "session_meta": {
         const current = sessions[e.sessionId];
         const nextIndex = sessionIndex.map((meta) =>
@@ -664,6 +681,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
     previewError: null,
     planPreviewOpen: false,
     slashCommands: {},
+    workflows: {},
 
     model: localStorage.getItem("grok.model") ?? "grok-build",
     models: MODELS,

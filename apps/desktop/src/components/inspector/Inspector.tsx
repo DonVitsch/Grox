@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDesktop, type InspectorTab } from "../../state/store";
-import type { DiffHunk, PlanStep, Session, WorkspaceEntry } from "../../bridge/types";
+import type { DiffHunk, PlanStep, Session, WorkflowRun, WorkspaceEntry } from "../../bridge/types";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { DiffView } from "../session/DiffView";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -176,11 +176,21 @@ function FileTreeNode({ node, onOpen }: { node: FileNode; onOpen(path: string): 
 
 function TasksTab({ session }: { session: Session }) {
   const { t } = useI18n();
+  const workflows = useDesktop((state) => state.workflows[session.id] ?? []);
+  const sendPrompt = useDesktop((state) => state.sendPrompt);
   const plans = session.blocks.filter((b) => b.type === "plan");
   const latest = plans[plans.length - 1];
-  if (!latest || latest.type !== "plan") return <Empty text={t("noPlan")} />;
+  if (workflows.length === 0 && (!latest || latest.type !== "plan")) return <Empty text={t("noPlan")} />;
   return (
-    <div className="space-y-1">
+    <div className="space-y-3">
+      {workflows.map((workflow) => (
+        <WorkflowCard
+          key={workflow.runId}
+          workflow={workflow}
+          onAction={(action) => sendPrompt(`/workflow ${action} ${workflow.name}`, [])}
+        />
+      ))}
+      {latest?.type === "plan" && <div className="space-y-1">
       {latest.steps.map((s: PlanStep, i: number) => (
         <div key={s.id} className="flex items-start gap-2.5 rounded-[4px] border border-line bg-raise px-3 py-2.5">
           <span className="tnum mt-0.5 text-[9.5px] text-faint">{String(i + 1).padStart(2, "0")}</span>
@@ -194,6 +204,87 @@ function TasksTab({ session }: { session: Session }) {
           </div>
         </div>
       ))}
+      </div>}
+    </div>
+  );
+}
+
+const terminalWorkflowStatuses = new Set(["complete", "failed", "cancelled", "interrupted"]);
+const pausedWorkflowStatuses = new Set([
+  "user_paused",
+  "back_off_paused",
+  "no_progress_paused",
+  "infra_paused",
+  "blocked",
+  "budget_limited",
+]);
+
+function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(action: "pause" | "resume" | "stop"): void }) {
+  const { language } = useI18n();
+  const zh = language === "zh-CN";
+  const terminal = terminalWorkflowStatuses.has(workflow.status);
+  const paused = pausedWorkflowStatuses.has(workflow.status);
+  const statusTone = workflow.status === "complete"
+    ? "text-green"
+    : workflow.status === "failed" || workflow.status === "cancelled" || workflow.status === "interrupted"
+      ? "text-red"
+      : paused
+        ? "text-gold"
+        : "text-acc";
+  return (
+    <div className="overflow-hidden rounded-[5px] border border-line2 bg-raise">
+      <div className="border-b border-line px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <Icon name="search" size={11} className={statusTone} />
+          <p className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-fg2">{workflow.name}</p>
+          <span className={`font-mono text-[8.5px] tracking-[0.08em] ${statusTone}`}>{workflow.status.toUpperCase()}</span>
+        </div>
+        {workflow.objective && <p className="mt-1.5 line-clamp-3 text-[10.5px] leading-relaxed text-mute">{workflow.objective}</p>}
+      </div>
+
+      {workflow.phases.length > 0 && (
+        <div className="space-y-1 border-b border-line px-3 py-2">
+          {workflow.phases.map((phase, index) => (
+            <div key={`${phase.title}-${index}`} className="flex items-center gap-2">
+              <span className={`h-1.5 w-1.5 rounded-full ${phase.state === "done" ? "bg-green" : phase.state === "active" ? "animate-pulse-dot bg-acc" : "bg-faint"}`} />
+              <span className={`text-[9.5px] ${phase.state === "active" ? "text-fg2" : "text-dim"}`}>{phase.title}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-3 py-2 font-mono text-[8.5px] text-dim">
+        <span>{zh ? "活跃代理" : "ACTIVE AGENTS"}</span><span className="text-right text-fg2">{workflow.activeAgents}</span>
+        <span>{zh ? "已用代理" : "AGENTS USED"}</span><span className="text-right text-fg2">{workflow.agentsUsed}{workflow.agentBudget !== undefined ? ` / ${workflow.agentBudget}` : ""}</span>
+        <span>{zh ? "耗时" : "ELAPSED"}</span><span className="text-right text-fg2">{fmtDuration(workflow.elapsedMs)}</span>
+      </div>
+
+      {(workflow.currentAgentLabel || workflow.lastEventDetail || workflow.pauseMessage || workflow.resultSummary) && (
+        <div className="border-t border-line px-3 py-2 text-[9.5px] leading-relaxed text-mute">
+          {workflow.currentAgentLabel && <p>{zh ? "正在运行：" : "Running: "}{workflow.currentAgentLabel}</p>}
+          {workflow.lastEventDetail && <p className="mt-1">{workflow.lastEventDetail}</p>}
+          {workflow.pauseMessage && <p className="mt-1 text-gold">{workflow.pauseMessage}</p>}
+          {workflow.resultSummary && <p className="mt-1 whitespace-pre-wrap text-fg2">{workflow.resultSummary}</p>}
+        </div>
+      )}
+
+      {!terminal && (
+        <div className="flex gap-1 border-t border-line p-2">
+          <button
+            onClick={() => onAction(paused ? "resume" : "pause")}
+            disabled={workflow.status === "budget_limited"}
+            title={workflow.status === "budget_limited" ? (zh ? "代理预算耗尽，需要通过 workflow 工具提高 agent_budget" : "Agent budget exhausted; raise agent_budget through the workflow tool") : undefined}
+            className="flex-1 rounded-[3px] border border-line2 px-2 py-1 font-mono text-[8.5px] text-mute hover:border-line3 hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {workflow.status === "budget_limited"
+              ? (zh ? "需要提高预算" : "RAISE BUDGET")
+              : paused ? (zh ? "恢复" : "RESUME") : (zh ? "暂停" : "PAUSE")}
+          </button>
+          <button onClick={() => onAction("stop")} className="flex-1 rounded-[3px] border border-red/30 px-2 py-1 font-mono text-[8.5px] text-red hover:bg-red/10">
+            {zh ? "停止" : "STOP"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

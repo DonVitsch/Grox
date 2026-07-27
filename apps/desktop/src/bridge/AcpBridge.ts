@@ -40,6 +40,7 @@ import type {
   RewindPoint,
   RewindResult,
   SlashCommand,
+  WorkflowRun,
 } from "./types";
 
 export const ACP_METHODS = {
@@ -165,6 +166,10 @@ function string(value: unknown): string | undefined {
 
 function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function bool(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function array(value: unknown): unknown[] {
@@ -548,12 +553,75 @@ function mapAvailableCommands(value: unknown): SlashCommand[] {
     const name = string(command?.name)?.replace(/^\//, "");
     if (!command || !name) return [];
     const inputHint = string(record(command.input)?.hint);
+    const tag = string(command.tag) ?? string(record(command._meta)?.tag);
     return [{
       name,
       description: string(command.description) ?? "Grok Runtime command",
       ...(inputHint ? { inputHint } : {}),
+      ...(tag ? { tag } : {}),
     }];
   });
+}
+
+function applyCommandTags(commands: SlashCommand[], tags: Map<string, string>): SlashCommand[] {
+  return commands.map((command) => {
+    const tag = tags.get(command.name) ?? command.tag;
+    return tag ? { ...command, tag } : command;
+  });
+}
+
+function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
+  const runId = string(update.runId) ?? string(update.run_id);
+  if (!runId) return undefined;
+  const phases = array(update.phases).flatMap((entry) => {
+    const phase = record(entry);
+    const title = string(phase?.title);
+    if (!phase || !title) return [];
+    const rawState = string(phase.state);
+    const state: WorkflowRun["phases"][number]["state"] =
+      rawState === "active" || rawState === "done" ? rawState : "pending";
+    return [{ title, state }];
+  });
+  const agents = array(update.agents).flatMap((entry) => {
+    const agent = record(entry);
+    const agentId = string(agent?.agentId) ?? string(agent?.agent_id);
+    if (!agent || !agentId) return [];
+    const tokensUsed = number(agent.tokensUsed) ?? number(agent.tokens_used);
+    const durationMs = number(agent.durationMs) ?? number(agent.duration_ms);
+    return [{
+      agentId,
+      label: string(agent.label) ?? agentId,
+      ...(string(agent.phase) ? { phase: string(agent.phase) } : {}),
+      ...(string(agent.model) ? { model: string(agent.model) } : {}),
+      state: string(agent.state) ?? "unknown",
+      ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    }];
+  });
+  return {
+    runId,
+    revision: number(update.revision) ?? 0,
+    name: string(update.name) ?? "workflow",
+    objective: string(update.objective) ?? "",
+    status: string(update.status) ?? "active",
+    foreground: bool(update.foreground) ?? false,
+    phases,
+    currentPhase: string(update.currentPhase) ?? string(update.current_phase),
+    agentBudget: number(update.agentBudget) ?? number(update.agent_budget),
+    agentsUsed: number(update.agentsUsed) ?? number(update.agents_used) ?? 0,
+    agentsReserved: number(update.agentsReserved) ?? number(update.agents_reserved) ?? 0,
+    agentsRemaining: number(update.agentsRemaining) ?? number(update.agents_remaining),
+    agentUsageIncomplete: bool(update.agentUsageIncomplete) ?? bool(update.agent_usage_incomplete) ?? false,
+    elapsedMs: number(update.elapsedMs) ?? number(update.elapsed_ms) ?? 0,
+    activeAgents: number(update.activeAgents) ?? number(update.active_agents) ?? 0,
+    currentAgentLabel: string(update.currentAgentLabel) ?? string(update.current_agent_label),
+    agents,
+    lastEvent: string(update.lastEvent) ?? string(update.last_event),
+    lastEventDetail: string(update.lastEventDetail) ?? string(update.last_event_detail),
+    lastEventTimestamp: string(update.lastEventTimestamp) ?? string(update.last_event_timestamp),
+    pauseMessage: string(update.pauseMessage) ?? string(update.pause_message),
+    resultSummary: string(update.resultSummary) ?? string(update.result_summary),
+  };
 }
 
 function combinedDisplayTexts(value: unknown): string[] | undefined {
@@ -577,6 +645,7 @@ function applyToSession(session: Session, event: BridgeEvent): Session {
     case "model_state":
     case "mode_state":
     case "available_commands":
+    case "workflow_update":
       return session;
     case "session_meta":
       return { ...session, ...event.patch };
@@ -692,7 +761,9 @@ export class AcpBridge implements GrokBridge {
   private authMethodId: string | undefined;
   private authState: AuthState = { required: false, inProgress: false };
   private modelState: ModelState = { models: MODELS, currentId: MODELS[0].id };
+  private runtimeCommandBase: SlashCommand[] = [];
   private runtimeCommands: SlashCommand[] = [];
+  private runtimeCommandTags = new Map<string, string>();
   private permissionMode: PermissionMode =
     localStorage.getItem("grok.permissionMode") === "auto"
       ? "auto"
@@ -865,7 +936,9 @@ export class AcpBridge implements GrokBridge {
     this.knownSessions.clear();
     this.authMethodId = undefined;
     this.modelState = { models: MODELS, currentId: MODELS[0].id };
+    this.runtimeCommandBase = [];
     this.runtimeCommands = [];
+    this.runtimeCommandTags.clear();
     const next = this.initializeAgent();
     this.ready = next;
     await next;
@@ -1087,6 +1160,23 @@ export class AcpBridge implements GrokBridge {
       this.captureModelState(paramsValue);
       return;
     }
+    if (method === "x.ai/settings/update") {
+      const params = record(paramsValue);
+      const snakeTagsPresent = Boolean(params && Object.prototype.hasOwnProperty.call(params, "slash_command_tags"));
+      const camelTagsPresent = Boolean(params && Object.prototype.hasOwnProperty.call(params, "slashCommandTags"));
+      if (params && (snakeTagsPresent || camelTagsPresent)) {
+        const tags = record(snakeTagsPresent ? params.slash_command_tags : params.slashCommandTags);
+        this.runtimeCommandTags = new Map(
+          Object.entries(tags ?? {}).flatMap(([name, value]) =>
+            typeof value === "string" ? [[name.replace(/^\//, ""), value] as const] : []),
+        );
+        this.runtimeCommands = applyCommandTags(this.runtimeCommandBase, this.runtimeCommandTags);
+        for (const sessionId of this.cursors.keys()) {
+          this.emit({ type: "available_commands", sessionId, commands: this.runtimeCommands });
+        }
+      }
+      return;
+    }
     if (method === "x.ai/session/prompt_complete") {
       const params = record(paramsValue);
       const sessionId = string(params?.sessionId);
@@ -1207,10 +1297,16 @@ export class AcpBridge implements GrokBridge {
         return;
       }
       case "available_commands_update": {
-        this.runtimeCommands = mapAvailableCommands(
+        this.runtimeCommandBase = mapAvailableCommands(
           update.availableCommands ?? update.available_commands,
         );
+        this.runtimeCommands = applyCommandTags(this.runtimeCommandBase, this.runtimeCommandTags);
         this.emit({ type: "available_commands", sessionId, commands: this.runtimeCommands });
+        return;
+      }
+      case "workflow_updated": {
+        const workflow = mapWorkflowRun(update);
+        if (workflow) this.emit({ type: "workflow_update", sessionId, workflow });
         return;
       }
       case "tool_call":
@@ -1328,6 +1424,11 @@ export class AcpBridge implements GrokBridge {
     const update = record(updateValue);
     if (!update) return;
     switch (string(update.sessionUpdate)) {
+      case "workflow_updated": {
+        const workflow = mapWorkflowRun(update);
+        if (workflow) this.emit({ type: "workflow_update", sessionId, workflow });
+        break;
+      }
       case "turn_completed":
         this.finishTurn(sessionId, record(update.usage));
         break;
@@ -1666,7 +1767,10 @@ export class AcpBridge implements GrokBridge {
     const commands = mapAvailableCommands(
       meta?.availableCommands ?? meta?.available_commands ?? response?.availableCommands,
     );
-    if (commands.length > 0) this.runtimeCommands = commands;
+    if (commands.length > 0) {
+      this.runtimeCommandBase = commands;
+      this.runtimeCommands = applyCommandTags(this.runtimeCommandBase, this.runtimeCommandTags);
+    }
   }
 
   private metaFromRow(rowValue: unknown, fallbackCwd = this.workspace): SessionMeta | undefined {
