@@ -13,14 +13,40 @@ jobs:
     name: Prepare release notes
     runs-on: windows-latest
     steps:
-      - name: Create GitHub release with generated notes
+      - name: Checkout release notes
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Create or update GitHub release notes
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $notesPath = ".github/release-notes/$env:GITHUB_REF_NAME.md"
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+            $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+            $generatedNotes = gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" `
+              -f "tag_name=$env:GITHUB_REF_NAME" `
+              --jq ".body"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            Set-Content -LiteralPath $notesPath -Value $generatedNotes -Encoding utf8NoBOM
+          }
+
           gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title "Grox $env:GITHUB_REF_NAME" --generate-notes --verify-tag
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:GITHUB_REF_NAME `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Grox $env:GITHUB_REF_NAME" `
+              --notes-file $notesPath
+          } else {
+            gh release create $env:GITHUB_REF_NAME `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Grox $env:GITHUB_REF_NAME" `
+              --notes-file $notesPath `
+              --verify-tag
           }
 
   build:
