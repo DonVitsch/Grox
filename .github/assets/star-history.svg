@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="title desc">
   <title id="title">dandandujie/Grox Star History</title>
-  <desc id="desc">GitHub Star 历史曲线，当前 36 Stars，数据截至 2026-07-27T09:25:32.000Z</desc>
+  <desc id="desc">GitHub Star 历史曲线，当前 37 Stars，数据截至 2026-07-27T17:33:05.000Z</desc>
   <defs>
     <filter id="rough" x="-4%" y="-4%" width="108%" height="108%">
       <feTurbulence type="fractalNoise" baseFrequency="0.008 0.12" numOctaves="2" seed="17" result="noise"/>
@@ -11,7 +11,7 @@
   <g filter="url(#rough)" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <path d="M 86 390 C 225 387, 336 393, 478 390 S 720 393, 926 389" stroke="#111111" stroke-width="4.5"/>
     <path d="M 86 390 C 82 322, 89 254, 85 188 S 89 88, 86 26" stroke="#111111" stroke-width="4.5"/>
-    <path d="M 86.0 390.0 L 150.4 380.9 L 150.7 371.8 L 151.9 362.7 L 152.5 353.6 L 152.9 344.5 L 153.4 335.4 L 154.2 326.3 L 169.1 317.2 L 169.4 308.1 L 171.3 299.0 L 177.6 289.9 L 191.3 280.8 L 200.7 271.7 L 212.4 262.6 L 220.0 253.5 L 220.4 244.4 L 228.4 235.3 L 249.4 226.2 L 267.9 217.1 L 285.2 208.0 L 301.2 198.9 L 318.1 189.8 L 325.4 180.7 L 339.4 171.6 L 529.3 162.5 L 538.8 153.4 L 632.3 144.3 L 715.8 135.2 L 719.4 126.1 L 751.2 117.0 L 752.3 107.9 L 752.3 98.8 L 752.5 89.7 L 828.5 80.6 L 900.7 71.5 L 926.0 62.4 L 926.0 62.4" stroke="#e84424" stroke-width="4" opacity="0.98"/>
+    <path d="M 86.0 390.0 L 148.0 380.9 L 148.2 371.8 L 149.4 362.7 L 150.0 353.6 L 150.3 344.5 L 150.9 335.4 L 151.7 326.3 L 166.0 317.2 L 166.2 308.1 L 168.1 299.0 L 174.2 289.9 L 187.4 280.8 L 196.4 271.7 L 207.7 262.6 L 214.9 253.5 L 215.4 244.4 L 223.1 235.3 L 243.2 226.2 L 261.1 217.1 L 277.7 208.0 L 293.1 198.9 L 309.4 189.8 L 316.4 180.7 L 329.8 171.6 L 512.6 162.5 L 521.7 153.4 L 611.8 144.3 L 692.0 135.2 L 695.5 126.1 L 726.1 117.0 L 727.2 107.9 L 727.2 98.8 L 727.4 89.7 L 800.5 80.6 L 870.0 71.5 L 894.3 62.4 L 926.0 53.3 L 926.0 53.3" stroke="#e84424" stroke-width="4" opacity="0.98"/>
   </g>
   <text x="73" y="306.0" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">10</text>
   <text x="73" y="215.0" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">20</text>
@@ -22,7 +22,7 @@
   <text x="366.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Tue 21</text>
   <text x="506.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Thu 23</text>
   <text x="646.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Fri 24</text>
-  <text x="786.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Sat 25</text>
+  <text x="786.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Sun 26</text>
   <text x="926.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Mon 27</text>
   <text x="480" y="462" text-anchor="middle" fill="#111111" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="22">Date</text>
   <text x="29" y="208" text-anchor="middle" fill="#111111" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="22" transform="rotate(-90 29 208)">GitHub Stars</text>
