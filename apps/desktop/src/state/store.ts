@@ -1539,7 +1539,11 @@ export const useDesktop = create<DesktopState>((set, get) => {
           persistWorkflowRuns(nextWorkflows);
         }
       }
-      await bridge.loadSession(activeId);
+      // `rewind/execute` is synchronous and already mutates the live ACP
+      // session. Reloading here races the CLI's stale session/load journal,
+      // which can resurrect the branch we just removed. Keep the atomically
+      // pruned local snapshot as the visible source of truth instead.
+      if (mode === "files_only") await bridge.loadSession(activeId);
       if (mode !== "files_only") get().setDraft(draftBeforeRewind);
       return result;
     },

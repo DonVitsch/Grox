@@ -2598,6 +2598,9 @@ export class AcpBridge implements GrokBridge {
   }
 
   private async hydrateWorkflowHistory(sessionId: string, cwd: string): Promise<void> {
+    // This endpoint is archival and can lag behind a successful rewind. Its
+    // data must never be allowed to repopulate a branch the user removed.
+    if (this.rewoundSessions.has(sessionId)) return;
     try {
       const collected = new Map<string, WorkflowRun>();
       const tracesByRun = new Map<string, Map<string, WorkflowAgentTrace>>();
