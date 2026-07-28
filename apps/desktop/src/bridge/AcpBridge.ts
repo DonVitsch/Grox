@@ -130,6 +130,11 @@ class AcpRpcError extends Error {
   }
 }
 
+function isInvalidParamsError(error: unknown): boolean {
+  if (error instanceof AcpRpcError && error.code === -32602) return true;
+  return error instanceof Error && /\binvalid params\b/i.test(error.message);
+}
+
 const uid = () => crypto.randomUUID();
 
 const EMPTY_USAGE: Usage = {
@@ -2064,11 +2069,24 @@ export class AcpBridge implements GrokBridge {
   async newSession(cwd: string): Promise<void> {
     const metaRequest = await this.sessionMeta(cwd);
     const computer = await invoke<ComputerSessionExtensions>("computer_session_extensions");
-    const responseValue = await this.request(ACP_METHODS.sessionNew, {
-      cwd,
-      mcpServers: computer.mcpServers,
-      _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
-    });
+    let responseValue: unknown;
+    try {
+      responseValue = await this.request(ACP_METHODS.sessionNew, {
+        cwd,
+        mcpServers: computer.mcpServers,
+        _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
+      });
+    } catch (error) {
+      // Older Grok CLIs reject the v0.2.3 Computer Use session extensions
+      // instead of ignoring unknown fields. Keep core ACP usable by retrying
+      // with the standard session/new shape.
+      if (!isInvalidParamsError(error)) throw error;
+      responseValue = await this.request(ACP_METHODS.sessionNew, {
+        cwd,
+        mcpServers: [],
+        _meta: metaRequest,
+      });
+    }
     const response = record(responseValue);
     const sessionId = string(response?.sessionId);
     if (!sessionId) throw new Error("session/new 未返回 sessionId");
@@ -2108,12 +2126,23 @@ export class AcpBridge implements GrokBridge {
     try {
       const metaRequest = await this.sessionMeta(meta.cwd);
       const computer = await invoke<ComputerSessionExtensions>("computer_session_extensions");
-      const response = await this.request(ACP_METHODS.sessionLoad, {
-        sessionId: id,
-        cwd: meta.cwd,
-        mcpServers: computer.mcpServers,
-        _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
-      }, 2 * 60_000);
+      let response: unknown;
+      try {
+        response = await this.request(ACP_METHODS.sessionLoad, {
+          sessionId: id,
+          cwd: meta.cwd,
+          mcpServers: computer.mcpServers,
+          _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
+        }, 2 * 60_000);
+      } catch (error) {
+        if (!isInvalidParamsError(error)) throw error;
+        response = await this.request(ACP_METHODS.sessionLoad, {
+          sessionId: id,
+          cwd: meta.cwd,
+          mcpServers: [],
+          _meta: metaRequest,
+        }, 2 * 60_000);
+      }
       const previousLease = this.computerLeases.get(id);
       if (previousLease && previousLease !== computer.leaseId) {
         await invoke("computer_clear_emergency_stop", { leaseId: previousLease }).catch(() => {});
