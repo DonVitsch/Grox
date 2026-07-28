@@ -152,7 +152,14 @@ function completeDeepResearchPrompt(text: string): string {
 /** Keep Grox's transport-only workflow alias out of the conversation replay. */
 function displayDeepResearchPrompt(text: string): string {
   const match = text.trim().match(/^\/workflow\s+grox-deep-research\s+([\s\S]+)$/i);
-  if (!match) return text;
+  if (!match) {
+    // Some older CLI session/load replays collapse the next user chunk and a
+    // stale host-side workflow command into one string (for example
+    // `你好/workflow grox-deep-research {...}`). The command was never typed by
+    // the user and, after a rewind, must not be allowed to resurrect itself.
+    const leaked = text.search(/\/workflow\s+grox-deep-research\b/i);
+    return leaked > 0 ? text.slice(0, leaked).trimEnd() : text;
+  }
   try {
     const args = JSON.parse(match[1]) as { query?: unknown };
     return typeof args.query === "string" ? `/deep-research${args.query ? ` ${args.query}` : ""}` : text;
