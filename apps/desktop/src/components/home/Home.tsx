@@ -28,7 +28,6 @@ export function Home() {
   const sessions = useDesktop((s) => s.sessions);
   const newSession = useDesktop((s) => s.newSession);
   const openSession = useDesktop((s) => s.openSession);
-  const sendPrompt = useDesktop((s) => s.sendPrompt);
   const workspace = useDesktop((s) => s.workspace);
   const startupError = useDesktop((s) => s.startupError);
   const auth = useDesktop((s) => s.auth);
@@ -48,8 +47,7 @@ export function Home() {
   const launch = async () => {
     const prompt = q.trim();
     if ((!prompt && attachments.length === 0) || readingFiles) return;
-    await newSession();
-    sendPrompt(prompt, attachments);
+    await newSession({ text: prompt, attachments });
     setQ("");
     setAttachments([]);
     setAttachmentError("");

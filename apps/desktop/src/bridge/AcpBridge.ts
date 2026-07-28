@@ -765,6 +765,7 @@ export class AcpBridge implements GrokBridge {
   private lastActivity = new Map<string, number>();
   private unlisten: UnlistenFn[] = [];
   private streamAppends = new Map<string, Extract<BridgeEvent, { type: "assistant_append" | "thinking_append" }>>();
+  private repeatedDeltas = new Map<string, { value: string; count: number }>();
   private streamFlushTimer: number | undefined;
   private toolPatches = new Map<string, Extract<BridgeEvent, { type: "tool_patch" }>>();
   private toolFlushTimer: number | undefined;
@@ -823,8 +824,18 @@ export class AcpBridge implements GrokBridge {
 
   private queueStreamAppend(event: Extract<BridgeEvent, { type: "assistant_append" | "thinking_append" }>) {
     const key = `${event.type}:${event.sessionId}:${event.blockId}`;
+    const delta = event.delta.replace(/(.{1,16})\1{5,}/gu, "$1$1…");
+    if (!delta) return;
+    const previous = this.repeatedDeltas.get(key);
+    if (previous?.value === delta && delta.trim().length <= 24) {
+      const count = previous.count + 1;
+      this.repeatedDeltas.set(key, { value: delta, count });
+      if (count >= 4) return;
+    } else {
+      this.repeatedDeltas.set(key, { value: delta, count: 1 });
+    }
     const pending = this.streamAppends.get(key);
-    this.streamAppends.set(key, pending ? { ...pending, delta: pending.delta + event.delta } : event);
+    this.streamAppends.set(key, pending ? { ...pending, delta: pending.delta + delta } : { ...event, delta });
     if (this.streamFlushTimer === undefined) {
       this.streamFlushTimer = window.setTimeout(() => this.flushStreamAppends(), STREAM_FLUSH_MS);
     }
@@ -1532,6 +1543,9 @@ export class AcpBridge implements GrokBridge {
           elapsedMs: cursor.thinkingStartedAt ? Date.now() - cursor.thinkingStartedAt : undefined,
         } as Partial<SessionBlock>,
       });
+      for (const key of this.repeatedDeltas.keys()) {
+        if (key.includes(`:${sessionId}:${cursor.thinkingId}`)) this.repeatedDeltas.delete(key);
+      }
       cursor.thinkingId = undefined;
       cursor.thinkingStartedAt = undefined;
     }
@@ -1554,6 +1568,9 @@ export class AcpBridge implements GrokBridge {
         blockId: cursor.assistantId,
         patch: { type: "assistant", streaming: false } as Partial<SessionBlock>,
       });
+      for (const key of this.repeatedDeltas.keys()) {
+        if (key.includes(`:${sessionId}:${cursor.assistantId}`)) this.repeatedDeltas.delete(key);
+      }
       cursor.assistantId = undefined;
     }
   }

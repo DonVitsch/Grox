@@ -129,7 +129,7 @@ interface DesktopState {
   init(): Promise<void>;
   goHome(): void;
   openSession(id: string): Promise<void>;
-  newSession(): Promise<void>;
+  newSession(launch?: { text: string; attachments?: PromptAttachment[] }): Promise<void>;
   newProject(): Promise<void>;
   openProject(id: string): Promise<void>;
   renameProject(id: string, name: string): void;
@@ -376,6 +376,7 @@ function providerModelState(state: ModelState, profile?: ProviderProfileSummary)
 let bridgeSubscribed = false;
 let workspaceWatchTimer: number | undefined;
 let workspaceWatchTick = 0;
+let pendingLaunch: { text: string; attachments: PromptAttachment[] } | undefined;
 
 function scheduleSessionCatalog(metas: SessionMeta[]) {
   pendingCatalog = metas;
@@ -511,6 +512,23 @@ export const useDesktop = create<DesktopState>((set, get) => {
       }
       case "session_ready": {
         const { blocks: _b, usage: _u, status: _st, ...meta } = e.session;
+        const launch = pendingLaunch;
+        pendingLaunch = undefined;
+        const optimistic = Object.values(sessions).find((item) => item.id.startsWith("pending-"));
+        const nextSession = launch && optimistic
+          ? {
+              ...e.session,
+              title: launch.text.trim().slice(0, 56) || e.session.title,
+              blocks: [{
+                type: "user" as const,
+                id: uid(),
+                text: launch.text,
+                attachments: launch.attachments.map(({ id, kind, name, mime, size }) => ({ id, kind, name, mime, size })),
+                ts: Date.now(),
+              }],
+              status: "running" as const,
+            }
+          : e.session;
         const nextIndex = [
           decorateSessions([meta])[0],
           ...sessionIndex.filter((m) => m.id !== e.session.id),
@@ -536,7 +554,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
           Object.entries(sessions).filter(([id]) => !id.startsWith("pending-")),
         );
         set({
-          sessions: { ...nextSessions, [e.session.id]: e.session },
+          sessions: { ...nextSessions, [e.session.id]: nextSession },
           sessionIndex: nextIndex,
           projects,
           workspace: e.session.cwd,
@@ -549,6 +567,14 @@ export const useDesktop = create<DesktopState>((set, get) => {
           permissionMode: composer.permissionMode,
           sessionComposers,
         });
+        if (launch) {
+          void bridge.prompt(e.session.id, launch.text, {
+            model: composer.model,
+            effort: composer.effort,
+            mode: composer.mode,
+            attachments: launch.attachments,
+          });
+        }
         break;
       }
       case "block_add":
@@ -803,7 +829,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
       if (!has) await bridge.loadSession(id);
     },
 
-    async newSession() {
+    async newSession(launch) {
+      pendingLaunch = launch
+        ? { text: launch.text, attachments: launch.attachments ?? [] }
+        : undefined;
       const pendingId = `pending-${uid()}`;
       const now = Date.now();
       set((state) => ({
@@ -818,7 +847,15 @@ export const useDesktop = create<DesktopState>((set, get) => {
             createdAt: now,
             updatedAt: now,
             model: state.model,
-            blocks: [],
+            blocks: launch
+              ? [{
+                  type: "user" as const,
+                  id: uid(),
+                  text: launch.text,
+                  attachments: (launch.attachments ?? []).map(({ id, kind, name, mime, size }) => ({ id, kind, name, mime, size })),
+                  ts: now,
+                }]
+              : [],
             usage: {
               inputTokens: 0,
               outputTokens: 0,
@@ -836,6 +873,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
         await bridge.newSession(get().workspace);
         set({ startupError: null });
       } catch (error) {
+        pendingLaunch = undefined;
         set((state) => {
           const sessions = { ...state.sessions };
           delete sessions[pendingId];
