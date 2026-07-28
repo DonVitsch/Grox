@@ -18,19 +18,21 @@ pub fn serve_http(lease_id: String) -> Result<HttpEndpoint, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| format!("无法启动 Computer Use MCP：{error}"))?;
     let address = listener.local_addr().map_err(|error| error.to_string())?;
     let state = Arc::new(Mutex::new(ComputerState {
-        lease_id: Some(lease_id),
+        lease_id: Some(lease_id.clone()),
         ..ComputerState::default()
     }));
     let expected = token.clone();
+    let session_id = lease_id.clone();
     thread::Builder::new()
         .name("grox-computer-mcp-http".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let state = Arc::clone(&state);
                 let token = expected.clone();
+                let session_id = session_id.clone();
                 let _ = thread::Builder::new()
                     .name("grox-computer-mcp-request".into())
-                    .spawn(move || handle_http(stream, &token, state));
+                    .spawn(move || handle_http(stream, &token, &session_id, state));
             }
         })
         .map_err(|error| format!("无法启动 Computer Use MCP 线程：{error}"))?;
@@ -46,7 +48,12 @@ fn uuid_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn handle_http(mut stream: TcpStream, token: &str, state: Arc<Mutex<ComputerState>>) {
+fn handle_http(
+    mut stream: TcpStream,
+    token: &str,
+    session_id: &str,
+    state: Arc<Mutex<ComputerState>>,
+) {
     let mut buffer = vec![0_u8; 1024 * 1024];
     let Ok(size) = stream.read(&mut buffer) else { return };
     let request = String::from_utf8_lossy(&buffer[..size]);
@@ -58,14 +65,21 @@ fn handle_http(mut stream: TcpStream, token: &str, state: Arc<Mutex<ComputerStat
             && line.trim()["authorization: bearer ".len()..].trim() == token
     });
     let (status, response) = if !authorized {
-        (401, json!({"error":"Unauthorized"}))
+        (401, Some(json!({"error":"Unauthorized"})))
     } else if !headers.starts_with("POST ") {
-        (405, json!({"error":"Method Not Allowed"}))
+        (405, Some(json!({"error":"Method Not Allowed"})))
     } else {
         match serde_json::from_str::<Value>(body.trim()) {
             Ok(request) => {
-                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                let id = request.get("id").cloned();
                 let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
+                if id.is_none() {
+                    let reply = format!(
+                        "HTTP/1.1 202 Accepted\r\nMcp-Session-Id: {session_id}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                    return;
+                }
                 let result = match method {
                     "initialize" => Ok(json!({
                         "protocolVersion": "2025-06-18",
@@ -85,16 +99,16 @@ fn handle_http(mut stream: TcpStream, token: &str, state: Arc<Mutex<ComputerStat
                     _ => Err(format!("不支持的 MCP 方法：{method}")),
                 };
                 match result {
-                    Ok(result) => (200, json!({"jsonrpc":"2.0","id":id,"result":result})),
-                    Err(message) => (200, json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":classified_error(&message)}],"isError":true}})),
+                    Ok(result) => (200, Some(json!({"jsonrpc":"2.0","id":id,"result":result}))),
+                    Err(message) => (200, Some(json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":classified_error(&message)}],"isError":true}}))),
                 }
             }
-            Err(error) => (400, json!({"error": error.to_string()})),
+            Err(error) => (400, Some(json!({"error": error.to_string()}))),
         }
     };
-    let payload = response.to_string();
+    let payload = response.map(|value| value.to_string()).unwrap_or_default();
     let reply = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nMcp-Session-Id: {session_id}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
     let _ = stream.write_all(reply.as_bytes());

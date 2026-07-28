@@ -46,8 +46,8 @@ export function SettingsModal() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-void/75 p-5 backdrop-blur-[3px]" onMouseDown={() => setOpen(false)}>
-      <div className="flex h-[min(760px,88vh)] w-[min(1040px,92vw)] overflow-hidden rounded-[9px] border border-line3 bg-panel shadow-2xl animate-fade-up" onMouseDown={(event) => event.stopPropagation()}>
-        <nav className="flex w-[190px] shrink-0 flex-col border-r border-line bg-void py-3">
+      <div className="flex h-[min(820px,92vh)] w-[min(1180px,96vw)] overflow-hidden rounded-[9px] border border-line3 bg-panel shadow-2xl animate-fade-up" onMouseDown={(event) => event.stopPropagation()}>
+        <nav className="flex w-[210px] shrink-0 flex-col border-r border-line bg-void py-3">
           <div className="px-4 pb-3"><Wordmark size={11} withMark={false} /></div>
           {sections.map((item) => (
             <button key={item.id} onClick={() => setSection(item.id)} className={`flex items-center gap-2 px-4 py-2 text-left font-mono text-[10px] transition-colors ${section === item.id ? "bg-high text-acc" : "text-dim hover:text-fg2"}`}>
@@ -58,7 +58,7 @@ export function SettingsModal() {
           <div className="flex-1" />
           <button onClick={() => setOpen(false)} className="mx-3 flex h-8 items-center justify-center rounded-[4px] border border-line2 text-[10px] text-mute hover:border-line3 hover:text-fg">{language === "zh-CN" ? "关闭" : "Close"}</button>
         </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto p-6">
+        <div className="min-w-0 flex-1 overflow-y-auto p-8">
           {section === "general" && <General />}
           {section === "account" && <Account />}
           {section === "appearance" && <Appearance />}
@@ -297,19 +297,32 @@ function ProviderAndModels() {
   };
 
   const filteredModels = availableModels.filter((id) => id.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
+  const removeProfile = async (id: string, name: string) => {
+    if (!window.confirm(zh ? `删除供应商“${name}”？` : `Delete provider “${name}”?`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await deleteProfile(id);
+      if (editingProfileId === id) startNewProfile();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return <div className="mt-7" data-testid="provider-manager">
-    <div className="mb-3 flex items-end justify-between"><div><h3 className="text-[12px] font-medium text-fg">{zh ? "模型服务" : "Model provider"}</h3><p className="mt-1 text-[10px] text-dim">{zh ? "供应商切换只重连后台 Grok Build ACP；密钥仅保存在本机配置与当前 WebView 内存中。" : "Provider changes reconnect only the Grok Build ACP process. Keys remain in local configuration and the current WebView memory."}</p></div><span className="chip">{provider.kind.toUpperCase()}</span></div>
+    <div className="mb-4 flex items-end justify-between"><div><h3 className="text-[15px] font-medium text-fg">{zh ? "模型服务" : "Model provider"}</h3><p className="mt-1 text-[11.5px] leading-relaxed text-dim">{zh ? "供应商切换只重连后台 Grok Build ACP；密钥仅保存在本机配置与当前 WebView 内存中。" : "Provider changes reconnect only the Grok Build ACP process. Keys remain in local configuration and the current WebView memory."}</p></div><span className="chip">{provider.kind.toUpperCase()}</span></div>
     <div className="grid grid-cols-3 gap-2">
       {(["oauth", "official", "compatible"] as ProviderKind[]).map((item) => <button key={item} onClick={() => selectProviderKind(item)} className={`min-w-0 rounded-[5px] border px-3 py-2.5 text-left transition-colors ${kind === item ? "border-acc-dim bg-acc-wash" : "border-line2 bg-raise hover:border-line3"}`}><Icon name={item === "oauth" ? "user" : item === "official" ? "bolt" : "globe"} size={12} className={kind === item ? "text-acc" : "text-dim"} /><p className="mt-2 truncate font-mono text-[9.5px] text-fg2">{item === "oauth" ? t("oauth") : item === "official" ? t("officialApi") : t("compatibleApi")}</p></button>)}
     </div>
-    {kind === "oauth" ? <div className="mt-3 rounded-[5px] border border-line bg-raise p-3 text-[10px] leading-relaxed text-dim"><span className="mr-2 inline-block h-1.5 w-1.5 animate-pulse-dot rounded-full bg-acc" />{zh ? "模型目录由 Grok OAuth 实时提供；上游目录变化会自动同步到设置和输入框。" : "The model catalog is supplied live by Grok OAuth and synchronized with every composer."}</div> : <div className={`mt-3 ${kind === "compatible" ? "grid min-h-[430px] grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-[7px] border border-line2 bg-raise" : ""}`}>
+    {kind === "oauth" ? <div className="mt-3 rounded-[5px] border border-line bg-raise p-4 text-[11.5px] leading-relaxed text-dim"><span className="mr-2 inline-block h-1.5 w-1.5 animate-pulse-dot rounded-full bg-acc" />{zh ? "模型目录由 Grok OAuth 实时提供；上游目录变化会自动同步到设置和输入框。" : "The model catalog is supplied live by Grok OAuth and synchronized with every composer."}</div> : <div className={`mt-4 ${kind === "compatible" ? "grid min-h-[500px] grid-cols-[220px_minmax(0,1fr)] overflow-hidden rounded-[7px] border border-line2 bg-raise" : ""}`}>
       {kind === "compatible" && <aside className="flex min-w-0 flex-col border-r border-line bg-void/55 p-2">
         <div className="mb-2 flex items-center justify-between px-1"><span className="lbl !text-[8.5px]">{zh ? "供应商" : "PROVIDERS"}</span><span className="tnum text-[8.5px] text-faint">{profiles.length}</span></div>
         <button onClick={startNewProfile} className={`mb-2 flex h-8 items-center gap-2 rounded-[4px] border px-2 font-mono text-[9px] transition-colors ${editingProfileId === undefined ? "border-acc-dim bg-acc-wash text-acc" : "border-line2 text-dim hover:border-line3 hover:text-fg"}`}><Icon name="plus" size={10} /><span className="truncate">{zh ? "新建供应商" : "NEW PROVIDER"}</span></button>
-        <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-0.5">{profiles.map((profile) => <div key={profile.id} className={`group rounded-[4px] border px-2 py-2 transition-colors ${editingProfileId === profile.id ? "border-acc-dim bg-acc-wash" : "border-transparent bg-high/45 hover:border-line2"}`}>
-          <button onClick={() => editProfile(profile.id)} className="block w-full min-w-0 text-left"><span className="flex items-center gap-1.5"><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeProfileId === profile.id ? "bg-acc" : "bg-faint"}`} /><span className="min-w-0 flex-1 truncate text-[9.5px] font-medium text-fg2" title={profile.name}>{profile.name}</span></span><span className="mt-1 block truncate pl-3 font-mono text-[7.5px] text-faint" title={profile.baseUrl}>{profile.baseUrl.replace(/^https?:\/\//, "")}</span></button>
-          <div className="mt-1.5 flex items-center justify-end gap-2 border-t border-line/70 pt-1.5">{activeProfileId === profile.id ? <span className="mr-auto font-mono text-[7.5px] text-acc">{zh ? "使用中" : "ACTIVE"}</span> : <button onClick={() => void activateProfile(profile.id).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))} className="mr-auto font-mono text-[8px] text-acc hover:text-fg">{zh ? "切换" : "USE"}</button>}<button onClick={() => editProfile(profile.id)} className="font-mono text-[8px] text-dim hover:text-fg">{zh ? "编辑" : "EDIT"}</button><button onClick={() => { if (window.confirm(zh ? `删除供应商“${profile.name}”？` : `Delete provider “${profile.name}”?`)) { if (editingProfileId === profile.id) startNewProfile(); void deleteProfile(profile.id); } }} className="text-faint hover:text-red" title={zh ? "删除" : "Delete"}><Icon name="trash" size={9} /></button></div>
+        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-0.5">{profiles.map((profile) => <div key={profile.id} className={`group rounded-[5px] border px-3 py-2.5 transition-colors ${editingProfileId === profile.id ? "border-acc-dim bg-acc-wash" : "border-transparent bg-high/45 hover:border-line2"}`}>
+          <button onClick={() => editProfile(profile.id)} className="block w-full min-w-0 text-left"><span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeProfileId === profile.id ? "bg-acc" : "bg-faint"}`} /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-fg2" title={profile.name}>{profile.name}</span></span><span className="mt-1.5 block truncate pl-3.5 font-mono text-[9px] text-faint" title={profile.baseUrl}>{profile.baseUrl.replace(/^https?:\/\//, "")}</span></button>
+          <div className="mt-2 flex items-center justify-end gap-3 border-t border-line/70 pt-2">{activeProfileId === profile.id ? <span className="mr-auto font-mono text-[9px] text-acc">{zh ? "使用中" : "ACTIVE"}</span> : <button onClick={() => void activateProfile(profile.id).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))} className="mr-auto font-mono text-[9.5px] text-acc hover:text-fg">{zh ? "切换" : "USE"}</button>}<button onClick={() => editProfile(profile.id)} className="font-mono text-[9.5px] text-dim hover:text-fg">{zh ? "编辑" : "EDIT"}</button><button disabled={busy} onClick={() => void removeProfile(profile.id, profile.name)} className="flex items-center gap-1 font-mono text-[9.5px] text-faint hover:text-red disabled:opacity-40" title={zh ? "删除" : "Delete"}><Icon name="trash" size={10} />{zh ? "删除" : "DELETE"}</button></div>
         </div>)}</div>
       </aside>}
       <div className={kind === "compatible" ? "min-w-0 p-4" : "rounded-[6px] border border-line2 bg-raise p-3"}>

@@ -125,7 +125,7 @@ class AcpRpcError extends Error {
     message: string,
     readonly data?: unknown,
   ) {
-    super(message);
+    super(`${message} · ${method}`);
     this.name = "AcpRpcError";
   }
 }
@@ -2104,6 +2104,11 @@ export class AcpBridge implements GrokBridge {
       model: string(detail?.modelId) ?? localStorage.getItem("grok.model") ?? "grok-build",
     };
     this.knownSessions.add(sessionId);
+    this.sessionOptions.set(sessionId, {
+      model: this.modelState.currentId,
+      effort: (localStorage.getItem("grok.effort") as PromptOptions["effort"]) ?? "high",
+      mode: "agent",
+    });
     this.sessionWorkspaces.set(sessionId, cwd);
     this.catalogue.set(sessionId, meta);
     this.cursors.set(sessionId, { toolBlocks: new Map() });

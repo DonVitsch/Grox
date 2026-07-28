@@ -1010,12 +1010,11 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
     async deleteProviderProfile(id) {
       const wasActive = get().activeProviderProfileId === id;
-      const activeId = get().activeId;
       await bridge.deleteProviderProfile(id);
       await get().refreshProviderProfiles();
       if (wasActive) {
         await Promise.all([get().refreshAccount(), get().refreshModels()]);
-        if (activeId) await bridge.loadSession(activeId);
+        set({ activeId: null, view: "home", startupError: null });
       }
     },
 
