@@ -2234,8 +2234,6 @@ Use only the grok_desktop_computer MCP tools for an explicit `/computer` or `@Co
 #[tauri::command]
 fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
     let plugin = ensure_computer_plugin()?;
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("无法定位 Grox computer use 执行器：{error}"))?;
     let mut lease_bytes = [0_u8; 16];
     getrandom::fill(&mut lease_bytes)
         .map_err(|error| format!("无法创建 Computer Use 租约：{error}"))?;
@@ -2244,12 +2242,16 @@ fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     computer_mcp::clear_emergency_stop(&lease_id)?;
+    let endpoint = computer_mcp::serve_http(lease_id.clone())?;
     Ok(ComputerSessionExtensions {
         mcp_servers: vec![serde_json::json!({
-            "type": "stdio",
+            "type": "http",
             "name": "grok_desktop_computer",
-            "command": executable,
-            "args": ["--computer-mcp", "--computer-lease", lease_id]
+            "url": endpoint.url,
+            "headers": [{
+                "name": "Authorization",
+                "value": format!("Bearer {}", endpoint.token)
+            }]
         })],
         plugin_dirs: vec![path_for_webview(&plugin)],
         lease_id,

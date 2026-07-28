@@ -1,9 +1,104 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
+    net::{TcpListener, TcpStream},
     path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
 };
+
+pub struct HttpEndpoint {
+    pub url: String,
+    pub token: String,
+}
+
+pub fn serve_http(lease_id: String) -> Result<HttpEndpoint, String> {
+    let token = uuid_token();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| format!("无法启动 Computer Use MCP：{error}"))?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let state = Arc::new(Mutex::new(ComputerState {
+        lease_id: Some(lease_id),
+        ..ComputerState::default()
+    }));
+    let expected = token.clone();
+    thread::Builder::new()
+        .name("grox-computer-mcp-http".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let state = Arc::clone(&state);
+                let token = expected.clone();
+                let _ = thread::Builder::new()
+                    .name("grox-computer-mcp-request".into())
+                    .spawn(move || handle_http(stream, &token, state));
+            }
+        })
+        .map_err(|error| format!("无法启动 Computer Use MCP 线程：{error}"))?;
+    Ok(HttpEndpoint {
+        url: format!("http://{address}/mcp"),
+        token,
+    })
+}
+
+fn uuid_token() -> String {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).unwrap_or(());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn handle_http(mut stream: TcpStream, token: &str, state: Arc<Mutex<ComputerState>>) {
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let Ok(size) = stream.read(&mut buffer) else { return };
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let mut parts = request.split("\r\n\r\n");
+    let headers = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default();
+    let authorized = headers.lines().any(|line| {
+        line.to_ascii_lowercase().starts_with("authorization: bearer ")
+            && line.trim()["authorization: bearer ".len()..].trim() == token
+    });
+    let (status, response) = if !authorized {
+        (401, json!({"error":"Unauthorized"}))
+    } else if !headers.starts_with("POST ") {
+        (405, json!({"error":"Method Not Allowed"}))
+    } else {
+        match serde_json::from_str::<Value>(body.trim()) {
+            Ok(request) => {
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
+                let result = match method {
+                    "initialize" => Ok(json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": { "listChanged": false } },
+                        "serverInfo": { "name": "grok_desktop_computer", "version": env!("CARGO_PKG_VERSION") }
+                    })),
+                    "ping" => Ok(json!({})),
+                    "tools/list" => Ok(json!({ "tools": tools() })),
+                    "tools/call" => {
+                        let params = request.get("params").cloned().unwrap_or_default();
+                        let mut guard = state.lock().ok();
+                        guard.as_deref_mut().map_or_else(
+                            || Err("Computer Use 状态锁定失败".to_string()),
+                            |state| call_tool(params, state),
+                        )
+                    }
+                    _ => Err(format!("不支持的 MCP 方法：{method}")),
+                };
+                match result {
+                    Ok(result) => (200, json!({"jsonrpc":"2.0","id":id,"result":result})),
+                    Err(message) => (200, json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":classified_error(&message)}],"isError":true}})),
+                }
+            }
+            Err(error) => (400, json!({"error": error.to_string()})),
+        }
+    };
+    let payload = response.to_string();
+    let reply = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    let _ = stream.write_all(reply.as_bytes());
+}
 
 pub fn run(lease_id: Option<String>) -> Result<(), String> {
     let stdin = io::stdin();
