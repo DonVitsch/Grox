@@ -48,6 +48,29 @@ export type InspectorTab = "files" | "tasks" | "preview" | "usage";
 const isWorkflowTerminal = (status: string) =>
   ["complete", "failed", "cancelled", "interrupted"].includes(status);
 
+function mergeWorkflowEvents(previous: WorkflowRun["events"], incoming: WorkflowRun["events"]): WorkflowRun["events"] {
+  const merged = [...previous, ...incoming];
+  const unique = new Map<string, WorkflowRun["events"][number]>();
+  for (const entry of merged) {
+    const key = `${entry.timestamp ?? ""}\u0000${entry.event}\u0000${entry.detail ?? ""}`;
+    unique.set(key, entry);
+  }
+  return [...unique.values()].slice(-64);
+}
+
+function mergeWorkflowRun(previous: WorkflowRun | undefined, incoming: WorkflowRun): WorkflowRun {
+  if (!previous) return incoming;
+  return {
+    ...previous,
+    ...incoming,
+    // Some versions omit unchanged arrays/fields on an update. Preserve the
+    // last complete snapshot, while accumulating the public progress journal.
+    phases: incoming.phases.length > 0 ? incoming.phases : previous.phases,
+    agents: incoming.agents.length > 0 ? incoming.agents : previous.agents,
+    events: mergeWorkflowEvents(previous.events, incoming.events),
+  };
+}
+
 export interface ProjectMeta {
   id: string;
   path: string;
@@ -498,16 +521,17 @@ export const useDesktop = create<DesktopState>((set, get) => {
         const current = state.workflows[e.sessionId] ?? [];
         const previous = current.find((run) => run.runId === e.workflow.runId);
         if (previous && previous.revision > e.workflow.revision) break;
-        const next = e.workflow.status === "cleared"
+        const workflow = mergeWorkflowRun(previous, e.workflow);
+        const next = workflow.status === "cleared"
           ? current.filter((run) => run.runId !== e.workflow.runId)
-          : [...current.filter((run) => run.runId !== e.workflow.runId), e.workflow]
+          : [...current.filter((run) => run.runId !== e.workflow.runId), workflow]
               .sort((a, b) => Number(isWorkflowTerminal(a.status)) - Number(isWorkflowTerminal(b.status)));
         // Background commands (notably /deep-research) return immediately.
         // Surface their live run in the GUI as soon as the first update
         // arrives, instead of leaving the user to discover the hidden panel.
         set({
           workflows: { ...state.workflows, [e.sessionId]: next },
-          ...(state.activeId === e.sessionId && e.workflow.status !== "cleared"
+          ...(state.activeId === e.sessionId && workflow.status !== "cleared"
             ? { inspectorOpen: true, inspectorTab: "tasks" as InspectorTab }
             : {}),
         });

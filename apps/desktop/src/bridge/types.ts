@@ -134,6 +134,13 @@ export interface WorkflowAgent {
   durationMs?: number;
 }
 
+/** A public workflow progress event emitted by the Grok CLI. */
+export interface WorkflowEvent {
+  event: string;
+  detail?: string;
+  timestamp?: string;
+}
+
 export interface WorkflowRun {
   runId: string;
   revision: number;
@@ -155,6 +162,7 @@ export interface WorkflowRun {
   lastEvent?: string;
   lastEventDetail?: string;
   lastEventTimestamp?: string;
+  events: WorkflowEvent[];
   pauseMessage?: string;
   resultSummary?: string;
 }

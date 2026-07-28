@@ -610,6 +610,9 @@ function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
       ...(durationMs !== undefined ? { durationMs } : {}),
     }];
   });
+  const lastEvent = string(update.lastEvent) ?? string(update.last_event);
+  const lastEventDetail = string(update.lastEventDetail) ?? string(update.last_event_detail);
+  const lastEventTimestamp = string(update.lastEventTimestamp) ?? string(update.last_event_timestamp);
   return {
     runId,
     revision: number(update.revision) ?? 0,
@@ -631,9 +634,14 @@ function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
     activeAgents: number(update.activeAgents) ?? number(update.active_agents) ?? 0,
     currentAgentLabel: string(update.currentAgentLabel) ?? string(update.current_agent_label),
     agents,
-    lastEvent: string(update.lastEvent) ?? string(update.last_event),
-    lastEventDetail: string(update.lastEventDetail) ?? string(update.last_event_detail),
-    lastEventTimestamp: string(update.lastEventTimestamp) ?? string(update.last_event_timestamp),
+    ...(lastEvent ? { lastEvent } : {}),
+    ...(lastEventDetail ? { lastEventDetail } : {}),
+    ...(lastEventTimestamp ? { lastEventTimestamp } : {}),
+    events: lastEvent ? [{
+      event: lastEvent,
+      ...(lastEventDetail ? { detail: lastEventDetail } : {}),
+      ...(lastEventTimestamp ? { timestamp: lastEventTimestamp } : {}),
+    }] : [],
     pauseMessage: string(update.pauseMessage) ?? string(update.pause_message),
     resultSummary: string(update.resultSummary) ?? string(update.result_summary),
   };

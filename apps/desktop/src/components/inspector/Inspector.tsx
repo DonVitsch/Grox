@@ -259,10 +259,39 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
         <span>{zh ? "耗时" : "ELAPSED"}</span><span className="text-right text-fg2">{fmtDuration(workflow.elapsedMs)}</span>
       </div>
 
-      {(workflow.currentAgentLabel || workflow.lastEventDetail || workflow.pauseMessage || workflow.resultSummary) && (
+      {workflow.agents.length > 0 && (
+        <div className="border-t border-line px-3 py-2">
+          <p className="mb-1.5 font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "子代理" : "SUBAGENTS"}</p>
+          <div className="space-y-1">
+            {workflow.agents.map((agent) => (
+              <div key={agent.agentId} className="grid grid-cols-[7px_minmax(0,1fr)_auto] items-center gap-2 rounded-[3px] bg-high/45 px-2 py-1.5">
+                <span className={`h-1.5 w-1.5 rounded-full ${agent.state === "running" ? "animate-pulse-dot bg-acc" : agent.state === "complete" || agent.state === "done" ? "bg-green" : agent.state === "failed" ? "bg-red" : "bg-faint"}`} />
+                <div className="min-w-0"><p className="truncate font-mono text-[9px] text-fg2">{agent.label}</p><p className="truncate text-[8.5px] text-dim">{[agent.phase, agent.model].filter(Boolean).join(" · ") || agent.state}</p></div>
+                <span className="font-mono text-[8px] text-faint">{agent.tokensUsed !== undefined ? `${agent.tokensUsed.toLocaleString()} tok` : ""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {workflow.events.length > 0 && (
+        <div className="border-t border-line px-3 py-2">
+          <p className="mb-1.5 font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "运行记录" : "RUN LOG"}</p>
+          <div className="max-h-52 space-y-1 overflow-y-auto pr-1">
+            {[...workflow.events].reverse().map((entry, index) => (
+              <div key={`${entry.timestamp ?? "event"}-${index}`} className="border-l border-line3 pl-2 text-[9px] leading-relaxed text-mute">
+                <p className="font-mono text-fg2">{entry.event}</p>
+                {entry.detail && <p className="mt-0.5 whitespace-pre-wrap break-words text-dim">{entry.detail}</p>}
+                {entry.timestamp && <p className="mt-0.5 font-mono text-[8px] text-faint">{entry.timestamp.replace("T", " ").replace("Z", "")}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(workflow.currentAgentLabel || workflow.pauseMessage || workflow.resultSummary) && (
         <div className="border-t border-line px-3 py-2 text-[9.5px] leading-relaxed text-mute">
           {workflow.currentAgentLabel && <p>{zh ? "正在运行：" : "Running: "}{workflow.currentAgentLabel}</p>}
-          {workflow.lastEventDetail && <p className="mt-1">{workflow.lastEventDetail}</p>}
           {workflow.pauseMessage && <p className="mt-1 text-gold">{workflow.pauseMessage}</p>}
           {workflow.resultSummary && <p className="mt-1 whitespace-pre-wrap text-fg2">{workflow.resultSummary}</p>}
         </div>
