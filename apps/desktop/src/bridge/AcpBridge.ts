@@ -157,7 +157,7 @@ function displayDeepResearchPrompt(text: string): string {
     // stale host-side workflow command into one string (for example
     // `你好/workflow grox-deep-research {...}`). The command was never typed by
     // the user and, after a rewind, must not be allowed to resurrect itself.
-    const leaked = text.search(/\/workflow\s+grox-deep-research\b/i);
+    const leaked = text.search(/\/workflow\s+(?:grox-deep-research|(?:pause|resume|stop)\s+\S+)\b/i);
     return leaked > 0 ? text.slice(0, leaked).trimEnd() : text;
   }
   try {
@@ -168,6 +168,15 @@ function displayDeepResearchPrompt(text: string): string {
   }
 }
 
+/** Workflow controls are task-panel protocol, never authored chat content. */
+function isWorkflowControlCommand(text: string): boolean {
+  return /^\/workflow\s+(?:pause|resume|stop)\s+\S+(?:\s|$)/i.test(text.trim());
+}
+
+function isWorkflowControlAcknowledgement(text: string): boolean {
+  return /^(?:Stopped|Paused|Resumed)\s+.+\.$/i.test(text.trim());
+}
+
 function isWorkflowLaunchAcknowledgement(text: string): boolean {
   return /^Workflow 'grox-deep-research' started in the background(?:\.|\s)/i.test(text.trim());
 }
@@ -176,6 +185,12 @@ function isWorkflowCompletionContinuation(update: JsonObject): boolean {
   const meta = record(update._meta);
   const promptId = string(meta?.promptId) ?? string(meta?.prompt_id) ?? string(update.promptId) ?? string(update.prompt_id);
   return Boolean(promptId && /^workflow-completed-/i.test(promptId));
+}
+
+function workflowCompletionRunId(update: JsonObject): string | undefined {
+  const meta = record(update._meta);
+  const promptId = string(meta?.promptId) ?? string(meta?.prompt_id) ?? string(update.promptId) ?? string(update.prompt_id);
+  return promptId?.match(/^workflow-completed-(wf_[A-Za-z0-9]+)-/i)?.[1];
 }
 
 const uid = () => crypto.randomUUID();
@@ -956,6 +971,10 @@ export class AcpBridge implements GrokBridge {
   private activeComputerSessions = new Set<string>();
   private activeComputerToolCalls = new Set<string>();
   private workflowChildTraces = new Map<string, { sessionId: string; runId: string; trace: WorkflowAgentTrace }>();
+  // A stopped workflow still emits a `workflow-completed-*` wake-up turn in
+  // the parent session. Its report is stale by definition, so remember the
+  // cancelled run across live updates and transcript replay.
+  private cancelledWorkflowRuns = new Map<string, Set<string>>();
   private ready: Promise<void>;
 
   constructor() {
@@ -1135,6 +1154,7 @@ export class AcpBridge implements GrokBridge {
     this.sessionSetModelUnsupported = false;
     this.knownSessions.clear();
     this.workflowChildTraces.clear();
+    this.cancelledWorkflowRuns.clear();
     this.authMethodId = undefined;
     this.modelState = { models: MODELS, currentId: MODELS[0].id };
     this.runtimeCommandBase = [];
@@ -1399,11 +1419,28 @@ export class AcpBridge implements GrokBridge {
     }
   }
 
+  private trackWorkflowStatus(sessionId: string, workflow: WorkflowRun) {
+    const cancelled = this.cancelledWorkflowRuns.get(sessionId) ?? new Set<string>();
+    if (workflow.status === "cancelled" || workflow.status === "interrupted") {
+      cancelled.add(workflow.runId);
+      this.cancelledWorkflowRuns.set(sessionId, cancelled);
+    } else if (workflow.status === "active") {
+      // A restarted run is authoritative again; never hide its new report
+      // because an older incarnation with the same id was stopped.
+      cancelled.delete(workflow.runId);
+      if (cancelled.size === 0) this.cancelledWorkflowRuns.delete(sessionId);
+    }
+  }
+
   private handleSessionUpdate(sessionId: string, updateValue: unknown) {
     const update = record(updateValue);
     if (!update) return;
     const type = string(update.sessionUpdate);
     const workflowCompletionContinuation = isWorkflowCompletionContinuation(update);
+    const completionRunId = workflowCompletionRunId(update);
+    const cancelledWorkflowCompletion = Boolean(
+      completionRunId && this.cancelledWorkflowRuns.get(sessionId)?.has(completionRunId),
+    );
     const child = this.workflowChildTraces.get(sessionId);
     if (child && (type === "agent_message_chunk" || type === "agent_thought_chunk" || type === "tool_call" || type === "tool_call_update" || type === "turn_completed")) {
       child.trace = applyWorkflowTraceUpdate(child.trace, update, Date.now());
@@ -1421,7 +1458,9 @@ export class AcpBridge implements GrokBridge {
         const combined = combinedDisplayTexts(update.content);
         if (combined) {
           for (const text of combined) {
+            if (isWorkflowControlCommand(text)) continue;
             const displayText = displayDeepResearchPrompt(text);
+            if (!displayText || isWorkflowControlCommand(displayText)) continue;
             const blockId = uid();
             cursor.userId = blockId;
             cursor.userText = displayText;
@@ -1440,6 +1479,7 @@ export class AcpBridge implements GrokBridge {
           return;
         }
         const delta = contentText(update.content);
+        if (isWorkflowControlCommand(delta)) return;
         const promptIndex = number(record(update._meta)?.promptIndex);
         const userId = cursor.userId;
         const beginsNewPrompt =
@@ -1480,7 +1520,10 @@ export class AcpBridge implements GrokBridge {
         // Starting the workflow is already represented by the live task card.
         // Do not manufacture a redundant assistant bubble for the CLI's
         // boilerplate acknowledgement; the eventual report remains visible.
-        if (!cursor.assistantId && isWorkflowLaunchAcknowledgement(delta)) return;
+        if (
+          (!cursor.assistantId && (isWorkflowLaunchAcknowledgement(delta) || isWorkflowControlAcknowledgement(delta)))
+          || (workflowCompletionContinuation && cancelledWorkflowCompletion)
+        ) return;
         if (!cursor.assistantId) {
           cursor.assistantId = uid();
           this.emit({
@@ -1541,7 +1584,10 @@ export class AcpBridge implements GrokBridge {
       }
       case "workflow_updated": {
         const workflow = mapWorkflowRun(update);
-        if (workflow) this.emit({ type: "workflow_update", sessionId, workflow });
+        if (workflow) {
+          this.trackWorkflowStatus(sessionId, workflow);
+          this.emit({ type: "workflow_update", sessionId, workflow });
+        }
         return;
       }
       case "tool_call":
@@ -1687,7 +1733,10 @@ export class AcpBridge implements GrokBridge {
     switch (type) {
       case "workflow_updated": {
         const workflow = mapWorkflowRun(update);
-        if (workflow) this.emit({ type: "workflow_update", sessionId, workflow });
+        if (workflow) {
+          this.trackWorkflowStatus(sessionId, workflow);
+          this.emit({ type: "workflow_update", sessionId, workflow });
+        }
         break;
       }
       case "subagent_spawned": {

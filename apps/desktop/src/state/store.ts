@@ -49,11 +49,15 @@ const isWorkflowTerminal = (status: string) =>
   ["complete", "failed", "cancelled", "interrupted"].includes(status);
 
 // `hideFromScrollback` is a wire-level flag, so old clients may already have
-// persisted this internal wake-up prompt as a normal user block. Keep a
+// persisted internal workflow traffic as normal user blocks. Keep a
 // state-layer guard as well: a draft update or a late session/load must never
-// bring that protocol control message back into the timeline.
-const isHiddenWorkflowControlPrompt = (block: SessionBlock) =>
-  block.type === "user" && /^A background workflow stopped\. Review the workflow completion reminder, report the result to the user, and take any appropriate next action\.$/i.test(block.text.trim());
+// bring task-panel controls back into the timeline.
+const isHiddenWorkflowControlPrompt = (block: SessionBlock) => {
+  if (block.type !== "user") return false;
+  const text = block.text.trim();
+  return /^A background workflow stopped\. Review the workflow completion reminder, report the result to the user, and take any appropriate next action\.$/i.test(text)
+    || /^\/workflow\s+(?:pause|resume|stop)\s+\S+(?:\s|$)/i.test(text);
+};
 
 function mergeWorkflowEvents(previous: WorkflowRun["events"], incoming: WorkflowRun["events"]): WorkflowRun["events"] {
   const merged = [...previous, ...incoming];
@@ -1420,9 +1424,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
       const trimmed = text.trim();
       if (!trimmed && attachments.length === 0) return;
+      const internalWorkflowControl = /^\/workflow\s+(?:pause|resume|stop)\s+\S+(?:\s|$)/i.test(trimmed);
       const titleText = trimmed || attachments.map((attachment) => attachment.name).join(", ");
       const nextIndex = get().sessionIndex.map((m) =>
-        m.id === session.id && m.title === "Untitled mission"
+        m.id === session.id && m.title === "Untitled mission" && !internalWorkflowControl
           ? { ...m, title: titleText.slice(0, 56) }
           : m,
       );
@@ -1438,17 +1443,21 @@ export const useDesktop = create<DesktopState>((set, get) => {
           ...sessions,
           [session.id]: {
             ...session,
-            title: session.title === "Untitled mission" ? titleText.slice(0, 56) : session.title,
-            blocks: [
-              ...session.blocks,
-              {
-                type: "user",
-                id: uid(),
-                text: trimmed,
-                attachments: attachments.map(({ id, kind, name, mime, size }) => ({ id, kind, name, mime, size })),
-                ts: Date.now(),
-              },
-            ],
+            title: session.title === "Untitled mission" && !internalWorkflowControl
+              ? titleText.slice(0, 56)
+              : session.title,
+            blocks: internalWorkflowControl
+              ? session.blocks
+              : [
+                  ...session.blocks,
+                  {
+                    type: "user",
+                    id: uid(),
+                    text: trimmed,
+                    attachments: attachments.map(({ id, kind, name, mime, size }) => ({ id, kind, name, mime, size })),
+                    ts: Date.now(),
+                  },
+                ],
           },
         },
         sessionIndex: nextIndex,
