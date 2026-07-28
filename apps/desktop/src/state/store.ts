@@ -48,6 +48,13 @@ export type InspectorTab = "files" | "tasks" | "preview" | "usage";
 const isWorkflowTerminal = (status: string) =>
   ["complete", "failed", "cancelled", "interrupted"].includes(status);
 
+// `hideFromScrollback` is a wire-level flag, so old clients may already have
+// persisted this internal wake-up prompt as a normal user block. Keep a
+// state-layer guard as well: a draft update or a late session/load must never
+// bring that protocol control message back into the timeline.
+const isHiddenWorkflowControlPrompt = (block: SessionBlock) =>
+  block.type === "user" && /^A background workflow stopped\. Review the workflow completion reminder, report the result to the user, and take any appropriate next action\.$/i.test(block.text.trim());
+
 function mergeWorkflowEvents(previous: WorkflowRun["events"], incoming: WorkflowRun["events"]): WorkflowRun["events"] {
   const merged = [...previous, ...incoming];
   const unique = new Map<string, WorkflowRun["events"][number]>();
@@ -490,6 +497,7 @@ function patchTool(
 function blocksBeforePrompt(blocks: SessionBlock[], targetPromptIndex: number): SessionBlock[] {
   let promptIndex = -1;
   return blocks.filter((block) => {
+    if (isHiddenWorkflowControlPrompt(block)) return false;
     if (block.type === "user") promptIndex += 1;
     return promptIndex < targetPromptIndex;
   });
@@ -615,14 +623,18 @@ export const useDesktop = create<DesktopState>((set, get) => {
         break;
       }
       case "session_ready": {
-        const { blocks: _b, usage: _u, status: _st, ...meta } = e.session;
+        const readySession = {
+          ...e.session,
+          blocks: e.session.blocks.filter((block) => !isHiddenWorkflowControlPrompt(block)),
+        };
+        const { blocks: _b, usage: _u, status: _st, ...meta } = readySession;
         const launch = pendingLaunch;
         pendingLaunch = undefined;
         const optimistic = Object.values(sessions).find((item) => item.id.startsWith("pending-"));
         const nextSession = launch && optimistic
           ? {
-              ...e.session,
-              title: launch.text.trim().slice(0, 56) || e.session.title,
+              ...readySession,
+              title: launch.text.trim().slice(0, 56) || readySession.title,
               blocks: [{
                 type: "user" as const,
                 id: uid(),
@@ -632,38 +644,38 @@ export const useDesktop = create<DesktopState>((set, get) => {
               }],
               status: "running" as const,
             }
-          : e.session;
+          : readySession;
         const nextIndex = [
           decorateSessions([meta])[0],
-          ...sessionIndex.filter((m) => m.id !== e.session.id),
+          ...sessionIndex.filter((m) => m.id !== readySession.id),
         ];
-        const projects = ensureProject(get().projects, e.session.cwd);
+        const projects = ensureProject(get().projects, readySession.cwd);
         persistSessionCatalog(nextIndex);
         const state = get();
-        const existingComposer = state.sessionComposers[e.session.id];
+        const existingComposer = state.sessionComposers[readySession.id];
         const composer: SessionComposerState = existingComposer ?? {
           text: "",
           attachments: [],
-          model: state.models.some((item) => item.id === e.session.model)
-            ? e.session.model
+          model: state.models.some((item) => item.id === readySession.model)
+            ? readySession.model
             : state.model,
           effort: state.effort,
           mode: state.mode,
           permissionMode: state.permissionMode,
         };
-        const sessionComposers = { ...state.sessionComposers, [e.session.id]: composer };
+        const sessionComposers = { ...state.sessionComposers, [readySession.id]: composer };
         persistSessionComposers(sessionComposers);
         bridge.setPermissionMode(composer.permissionMode);
         const nextSessions = Object.fromEntries(
           Object.entries(sessions).filter(([id]) => !id.startsWith("pending-")),
         );
         set({
-          sessions: { ...nextSessions, [e.session.id]: nextSession },
+          sessions: { ...nextSessions, [readySession.id]: nextSession },
           sessionIndex: nextIndex,
           projects,
-          workspace: e.session.cwd,
-          activeProjectId: projectId(e.session.cwd),
-          activeId: e.session.id,
+          workspace: readySession.cwd,
+          activeProjectId: projectId(readySession.cwd),
+          activeId: readySession.id,
           view: "session",
           model: composer.model,
           effort: composer.effort,
@@ -672,7 +684,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
           sessionComposers,
         });
         if (launch) {
-          void bridge.prompt(e.session.id, launch.text, {
+          void bridge.prompt(readySession.id, launch.text, {
             model: composer.model,
             effort: composer.effort,
             mode: composer.mode,
@@ -682,6 +694,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
         break;
       }
       case "block_add":
+        if (isHiddenWorkflowControlPrompt(e.block)) break;
         withSession(e.sessionId, (s) => ({ ...s, blocks: [...s.blocks, e.block] }));
         if (e.block.type === "plan" && get().activeId === e.sessionId) {
           set({ planPreviewOpen: true, previewOpen: false });
