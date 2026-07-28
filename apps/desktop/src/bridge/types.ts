@@ -141,6 +141,35 @@ export interface WorkflowEvent {
   timestamp?: string;
 }
 
+/** A public, replayable entry from an individual workflow subagent session. */
+export interface WorkflowTraceEntry {
+  id: string;
+  kind: "output" | "thinking" | "tool" | "event";
+  title?: string;
+  detail?: string;
+  status?: string;
+  timestamp?: number;
+}
+
+/**
+ * Subagent detail reconstructed from public ACP session updates. This is
+ * deliberately separate from `agents`: the workflow snapshot only has a
+ * compact status row, whereas the child session has its own public log.
+ */
+export interface WorkflowAgentTrace {
+  agentId: string;
+  childSessionId: string;
+  label: string;
+  phase?: string;
+  model?: string;
+  state?: string;
+  toolCalls?: number;
+  turns?: number;
+  tokensUsed?: number;
+  durationMs?: number;
+  entries: WorkflowTraceEntry[];
+}
+
 export interface WorkflowRun {
   runId: string;
   revision: number;
@@ -163,6 +192,7 @@ export interface WorkflowRun {
   lastEventDetail?: string;
   lastEventTimestamp?: string;
   events: WorkflowEvent[];
+  agentTraces?: WorkflowAgentTrace[];
   pauseMessage?: string;
   resultSummary?: string;
 }
@@ -428,6 +458,7 @@ export type BridgeEvent =
   | { type: "mode_state"; sessionId: string; mode: AgentMode }
   | { type: "available_commands"; sessionId: string; commands: SlashCommand[] }
   | { type: "workflow_update"; sessionId: string; workflow: WorkflowRun }
+  | { type: "workflow_trace_update"; sessionId: string; runId: string; trace: WorkflowAgentTrace }
   | { type: "session_ready"; session: Session }
   | { type: "session_meta"; sessionId: string; patch: Partial<SessionMeta> }
   | { type: "block_add"; sessionId: string; block: SessionBlock }

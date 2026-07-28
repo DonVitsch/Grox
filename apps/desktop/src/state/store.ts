@@ -60,6 +60,12 @@ function mergeWorkflowEvents(previous: WorkflowRun["events"], incoming: Workflow
 
 function mergeWorkflowRun(previous: WorkflowRun | undefined, incoming: WorkflowRun): WorkflowRun {
   if (!previous) return incoming;
+  const traces = incoming.agentTraces
+    ? [...new Map([
+      ...(previous.agentTraces ?? []).map((trace) => [trace.childSessionId, trace] as const),
+      ...incoming.agentTraces.map((trace) => [trace.childSessionId, trace] as const),
+    ]).values()]
+    : previous.agentTraces;
   return {
     ...previous,
     ...incoming,
@@ -68,6 +74,7 @@ function mergeWorkflowRun(previous: WorkflowRun | undefined, incoming: WorkflowR
     phases: incoming.phases.length > 0 ? incoming.phases : previous.phases,
     agents: incoming.agents.length > 0 ? incoming.agents : previous.agents,
     events: mergeWorkflowEvents(previous.events, incoming.events),
+    ...(traces ? { agentTraces: traces } : {}),
   };
 }
 
@@ -262,6 +269,9 @@ function loadWorkflowRuns(): Record<string, WorkflowRun[]> {
       phases: Array.isArray(run.phases) ? run.phases : [],
       agents: Array.isArray(run.agents) ? run.agents : [],
       events: Array.isArray(run.events) ? run.events : [],
+      agentTraces: Array.isArray(run.agentTraces)
+        ? run.agentTraces.map((trace) => ({ ...trace, entries: Array.isArray(trace.entries) ? trace.entries : [] }))
+        : [],
     }))]),
   );
 }
@@ -272,11 +282,13 @@ function persistWorkflowRuns(runs: Record<string, WorkflowRun[]>) {
   workflowPersistTimer = window.setTimeout(() => {
     // Keep a bounded, session-keyed archive. Full workflow event payloads can
     // be large, so the live in-memory view keeps 64 events while the durable
-    // archive keeps the latest 48 per run and 48 runs per session.
+    // archive keeps the latest 48 per run and 48 runs per session. A child
+    // transcript is independently bounded so research history stays local.
     const archive = Object.fromEntries(
       Object.entries(pendingWorkflowRuns ?? {}).map(([sessionId, entries]) => [sessionId, entries.slice(-48).map((entry) => ({
         ...entry,
         events: entry.events.slice(-48),
+        agentTraces: entry.agentTraces?.map((trace) => ({ ...trace, entries: trace.entries.slice(-80) })),
       }))]),
     );
     localStorage.setItem(WORKFLOW_RUNS_KEY, JSON.stringify(archive));
@@ -570,6 +582,21 @@ export const useDesktop = create<DesktopState>((set, get) => {
             ? { inspectorOpen: true, inspectorTab: "tasks" as InspectorTab }
             : {}),
         });
+        persistWorkflowRuns({ ...state.workflows, [e.sessionId]: next });
+        break;
+      }
+      case "workflow_trace_update": {
+        const state = get();
+        const current = state.workflows[e.sessionId] ?? [];
+        const next = current.map((workflow) => workflow.runId !== e.runId ? workflow : {
+          ...workflow,
+          agentTraces: [
+            ...(workflow.agentTraces ?? []).filter((trace) => trace.childSessionId !== e.trace.childSessionId),
+            e.trace,
+          ],
+        });
+        if (next === current || !current.some((workflow) => workflow.runId === e.runId)) break;
+        set({ workflows: { ...state.workflows, [e.sessionId]: next } });
         persistWorkflowRuns({ ...state.workflows, [e.sessionId]: next });
         break;
       }

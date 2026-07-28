@@ -40,6 +40,8 @@ import type {
   RewindPoint,
   RewindResult,
   SlashCommand,
+  WorkflowAgentTrace,
+  WorkflowTraceEntry,
   WorkflowRun,
 } from "./types";
 
@@ -647,6 +649,111 @@ function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
   };
 }
 
+function workflowEnvelopeTimestamp(envelope: JsonObject): number | undefined {
+  const value = number(envelope.timestamp);
+  if (value === undefined) return undefined;
+  // JSONL stores milliseconds in current CLIs, but older builds wrote Unix
+  // seconds. Normalize so the inspector can render a real local timestamp.
+  return value < 10_000_000_000 ? value * 1_000 : value;
+}
+
+function workflowTraceSpawn(update: JsonObject): { runId: string; trace: WorkflowAgentTrace } | undefined {
+  const runId = string(update.workflowRunId) ?? string(update.workflow_run_id);
+  const childSessionId = string(update.childSessionId) ?? string(update.child_session_id);
+  if (!runId || !childSessionId) return undefined;
+  const agentId = string(update.subagentId) ?? string(update.subagent_id) ?? childSessionId;
+  return {
+    runId,
+    trace: {
+      agentId,
+      childSessionId,
+      label: string(update.description) ?? string(update.label) ?? agentId,
+      phase: string(update.phase),
+      model: string(update.model),
+      state: "running",
+      entries: [],
+    },
+  };
+}
+
+function appendWorkflowTraceEntry(entries: WorkflowTraceEntry[], entry: WorkflowTraceEntry): WorkflowTraceEntry[] {
+  const last = entries.at(-1);
+  // ACP emits output/thinking in small chunks. Coalesce contiguous chunks so
+  // a task panel remains readable without dropping the public transcript.
+  if (last && (entry.kind === "output" || entry.kind === "thinking") && last.kind === entry.kind) {
+    return [...entries.slice(0, -1), {
+      ...last,
+      detail: `${last.detail ?? ""}${entry.detail ?? ""}`.slice(-32_000),
+      timestamp: entry.timestamp ?? last.timestamp,
+    }];
+  }
+  return [...entries, entry].slice(-96);
+}
+
+function applyWorkflowTraceUpdate(
+  trace: WorkflowAgentTrace,
+  update: JsonObject,
+  timestamp?: number,
+): WorkflowAgentTrace {
+  const type = string(update.sessionUpdate);
+  const entries = [...trace.entries];
+  const callId = string(update.toolCallId) ?? string(update.tool_call_id);
+  const toolTitle = string(update.title) ?? string(update.kind) ?? "tool";
+  const append = (entry: WorkflowTraceEntry) => appendWorkflowTraceEntry(entries, entry);
+  switch (type) {
+    case "agent_message_chunk":
+      return { ...trace, entries: append({ id: uid(), kind: "output", detail: contentText(update.content), timestamp }) };
+    case "agent_thought_chunk":
+      return { ...trace, entries: append({ id: uid(), kind: "thinking", detail: contentText(update.content), timestamp }) };
+    case "tool_call":
+      return {
+        ...trace,
+        entries: append({
+          id: callId ?? uid(), kind: "tool", title: toolTitle,
+          detail: string(update.detail) ?? jsonText(update.rawInput), status: string(update.status) ?? "running", timestamp,
+        }),
+      };
+    case "tool_call_update": {
+      const index = callId ? entries.findIndex((entry) => entry.id === callId) : -1;
+      const detail = string(update.detail) ?? toolOutputText(update.rawOutput, update.content);
+      if (index >= 0) {
+        entries[index] = {
+          ...entries[index], title: string(update.title) ?? entries[index].title,
+          detail: detail ?? entries[index].detail, status: string(update.status) ?? entries[index].status,
+          timestamp: timestamp ?? entries[index].timestamp,
+        };
+        return { ...trace, entries };
+      }
+      return { ...trace, entries: append({ id: callId ?? uid(), kind: "tool", title: toolTitle, detail, status: string(update.status), timestamp }) };
+    }
+    case "turn_completed":
+      return { ...trace, state: string(update.stopReason) ?? string(update.stop_reason) ?? "complete" };
+    default:
+      return trace;
+  }
+}
+
+function applyWorkflowSubagentStatus(trace: WorkflowAgentTrace, update: JsonObject): WorkflowAgentTrace {
+  const type = string(update.sessionUpdate);
+  if (type === "subagent_progress") return {
+    ...trace,
+    state: "running",
+    toolCalls: number(update.toolCalls) ?? number(update.tool_calls) ?? trace.toolCalls,
+    turns: number(update.turns) ?? number(update.turn_count) ?? trace.turns,
+    tokensUsed: number(update.tokensUsed) ?? number(update.tokens_used) ?? trace.tokensUsed,
+    durationMs: number(update.durationMs) ?? number(update.duration_ms) ?? trace.durationMs,
+  };
+  if (type === "subagent_finished") return {
+    ...trace,
+    state: string(update.status) ?? "complete",
+    toolCalls: number(update.toolCalls) ?? number(update.tool_calls) ?? trace.toolCalls,
+    turns: number(update.turns) ?? number(update.turn_count) ?? trace.turns,
+    tokensUsed: number(update.tokensUsed) ?? number(update.tokens_used) ?? trace.tokensUsed,
+    durationMs: number(update.durationMs) ?? number(update.duration_ms) ?? trace.durationMs,
+  };
+  return trace;
+}
+
 function combinedDisplayTexts(value: unknown): string[] | undefined {
   const content = record(value);
   const meta = record(content?._meta);
@@ -669,6 +776,7 @@ function applyToSession(session: Session, event: BridgeEvent): Session {
     case "mode_state":
     case "available_commands":
     case "workflow_update":
+    case "workflow_trace_update":
       return session;
     case "session_meta":
       return { ...session, ...event.patch };
@@ -802,6 +910,7 @@ export class AcpBridge implements GrokBridge {
   private computerLeases = new Map<string, string>();
   private activeComputerSessions = new Set<string>();
   private activeComputerToolCalls = new Set<string>();
+  private workflowChildTraces = new Map<string, { sessionId: string; runId: string; trace: WorkflowAgentTrace }>();
   private ready: Promise<void>;
 
   constructor() {
@@ -980,6 +1089,7 @@ export class AcpBridge implements GrokBridge {
     this.sessionOptions.clear();
     this.sessionSetModelUnsupported = false;
     this.knownSessions.clear();
+    this.workflowChildTraces.clear();
     this.authMethodId = undefined;
     this.modelState = { models: MODELS, currentId: MODELS[0].id };
     this.runtimeCommandBase = [];
@@ -1248,6 +1358,11 @@ export class AcpBridge implements GrokBridge {
     const update = record(updateValue);
     if (!update) return;
     const type = string(update.sessionUpdate);
+    const child = this.workflowChildTraces.get(sessionId);
+    if (child && (type === "agent_message_chunk" || type === "agent_thought_chunk" || type === "tool_call" || type === "tool_call_update" || type === "turn_completed")) {
+      child.trace = applyWorkflowTraceUpdate(child.trace, update, Date.now());
+      this.emit({ type: "workflow_trace_update", sessionId: child.sessionId, runId: child.runId, trace: child.trace });
+    }
     const cursor = this.cursor(sessionId);
 
     switch (type) {
@@ -1501,10 +1616,33 @@ export class AcpBridge implements GrokBridge {
   private handleXaiUpdate(sessionId: string, updateValue: unknown) {
     const update = record(updateValue);
     if (!update) return;
-    switch (string(update.sessionUpdate)) {
+    const type = string(update.sessionUpdate);
+    const child = this.workflowChildTraces.get(sessionId);
+    if (child && (type === "agent_message_chunk" || type === "agent_thought_chunk" || type === "tool_call" || type === "tool_call_update" || type === "turn_completed")) {
+      child.trace = applyWorkflowTraceUpdate(child.trace, update, Date.now());
+      this.emit({ type: "workflow_trace_update", sessionId: child.sessionId, runId: child.runId, trace: child.trace });
+    }
+    switch (type) {
       case "workflow_updated": {
         const workflow = mapWorkflowRun(update);
         if (workflow) this.emit({ type: "workflow_update", sessionId, workflow });
+        break;
+      }
+      case "subagent_spawned": {
+        const spawn = workflowTraceSpawn(update);
+        if (!spawn) break;
+        this.workflowChildTraces.set(spawn.trace.childSessionId, { sessionId, runId: spawn.runId, trace: spawn.trace });
+        this.emit({ type: "workflow_trace_update", sessionId, runId: spawn.runId, trace: spawn.trace });
+        break;
+      }
+      case "subagent_progress":
+      case "subagent_finished": {
+        const childSessionId = string(update.childSessionId) ?? string(update.child_session_id);
+        const traceState = childSessionId ? this.workflowChildTraces.get(childSessionId) : undefined;
+        if (traceState) {
+          traceState.trace = applyWorkflowSubagentStatus(traceState.trace, update);
+          this.emit({ type: "workflow_trace_update", sessionId: traceState.sessionId, runId: traceState.runId, trace: traceState.trace });
+        }
         break;
       }
       case "turn_completed":
@@ -2252,6 +2390,8 @@ export class AcpBridge implements GrokBridge {
   private async hydrateWorkflowHistory(sessionId: string, cwd: string): Promise<void> {
     try {
       const collected = new Map<string, WorkflowRun>();
+      const tracesByRun = new Map<string, Map<string, WorkflowAgentTrace>>();
+      const childRunIds = new Map<string, string>();
       let offset = 0;
       for (let page = 0; page < 40; page += 1) {
         const response = record(await this.request("x.ai/session/updates", {
@@ -2265,27 +2405,93 @@ export class AcpBridge implements GrokBridge {
           const envelope = record(entry);
           const params = record(envelope?.params);
           const update = record(params?.update);
-          if (string(update?.sessionUpdate) !== "workflow_updated") continue;
-          const workflow = update && mapWorkflowRun(update);
-          if (!workflow) continue;
-          const previous = collected.get(workflow.runId);
-          collected.set(workflow.runId, previous ? {
-            ...previous,
-            ...workflow,
-            phases: workflow.phases.length > 0 ? workflow.phases : previous.phases,
-            agents: workflow.agents.length > 0 ? workflow.agents : previous.agents,
-            events: [...previous.events, ...workflow.events],
-          } : workflow);
+          if (!update) continue;
+          const type = string(update.sessionUpdate);
+          if (type === "workflow_updated") {
+            const workflow = mapWorkflowRun(update);
+            if (!workflow) continue;
+            const previous = collected.get(workflow.runId);
+            collected.set(workflow.runId, previous ? {
+              ...previous,
+              ...workflow,
+              phases: workflow.phases.length > 0 ? workflow.phases : previous.phases,
+              agents: workflow.agents.length > 0 ? workflow.agents : previous.agents,
+              events: [...previous.events, ...workflow.events],
+            } : workflow);
+            continue;
+          }
+          if (type === "subagent_spawned") {
+            const spawn = workflowTraceSpawn(update);
+            if (!spawn) continue;
+            childRunIds.set(spawn.trace.childSessionId, spawn.runId);
+            this.workflowChildTraces.set(spawn.trace.childSessionId, { sessionId, runId: spawn.runId, trace: spawn.trace });
+            const traces = tracesByRun.get(spawn.runId) ?? new Map<string, WorkflowAgentTrace>();
+            traces.set(spawn.trace.childSessionId, spawn.trace);
+            tracesByRun.set(spawn.runId, traces);
+            continue;
+          }
+          if (type === "subagent_progress" || type === "subagent_finished") {
+            const childSessionId = string(update.childSessionId) ?? string(update.child_session_id);
+            const runId = childSessionId ? childRunIds.get(childSessionId) : undefined;
+            const trace = childSessionId && runId ? tracesByRun.get(runId)?.get(childSessionId) : undefined;
+            if (trace && childSessionId && runId) {
+              tracesByRun.get(runId)?.set(childSessionId, applyWorkflowSubagentStatus(trace, update));
+            }
+          }
         }
         offset += updates.length;
         if (!bool(response?.hasMore) || updates.length === 0) break;
       }
       for (const workflow of collected.values()) {
-        this.emit({ type: "workflow_update", sessionId, workflow });
+        const traces = tracesByRun.get(workflow.runId);
+        const initial = traces?.size ? { ...workflow, agentTraces: [...traces.values()] } : workflow;
+        this.emit({ type: "workflow_update", sessionId, workflow: initial });
+        if (!traces?.size) continue;
+        const detailed = await Promise.all(
+          [...traces.values()].slice(0, 16).map((trace) => this.hydrateWorkflowAgentTrace(trace, cwd)),
+        );
+        for (const trace of detailed) {
+          this.workflowChildTraces.set(trace.childSessionId, { sessionId, runId: workflow.runId, trace });
+        }
+        this.emit({
+          type: "workflow_update",
+          sessionId,
+          workflow: { ...workflow, agentTraces: detailed },
+        });
       }
     } catch {
       // Bulk session history is an optional extension. Live workflow updates
       // and locally archived runs remain available on older CLI builds.
+    }
+  }
+
+  /** Fetch an individual child session's public ACP update stream. */
+  private async hydrateWorkflowAgentTrace(trace: WorkflowAgentTrace, cwd: string): Promise<WorkflowAgentTrace> {
+    try {
+      let result = trace;
+      let offset = 0;
+      for (let page = 0; page < 12; page += 1) {
+        const response = record(await this.request("x.ai/session/updates", {
+          sessionId: trace.childSessionId,
+          cwd,
+          offset,
+          limit: 1_000,
+        }, 2 * 60_000));
+        const updates = array(response?.updates);
+        for (const entry of updates) {
+          const envelope = record(entry);
+          const params = record(envelope?.params);
+          const update = record(params?.update);
+          if (update) result = applyWorkflowTraceUpdate(result, update, workflowEnvelopeTimestamp(envelope ?? {}));
+        }
+        offset += updates.length;
+        if (!bool(response?.hasMore) || updates.length === 0) break;
+      }
+      return result;
+    } catch {
+      // A child may have been ephemeral or its local transcript may already
+      // have been pruned. Keep the parent workflow's public status row.
+      return trace;
     }
   }
 

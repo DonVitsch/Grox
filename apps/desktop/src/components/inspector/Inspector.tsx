@@ -228,7 +228,17 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
   const { language } = useI18n();
   const zh = language === "zh-CN";
   const terminal = terminalWorkflowStatuses.has(workflow.status);
+  // Completed runs are normally opened from history. Keeping those compact
+  // avoids an old deep-research run taking over the whole task panel, while a
+  // live run still opens itself for immediate progress feedback.
+  const [expanded, setExpanded] = useState(!terminal);
   const paused = pausedWorkflowStatuses.has(workflow.status);
+  const currentPhaseIndex = workflow.currentPhase
+    ? workflow.phases.findIndex((phase) => phase.title === workflow.currentPhase)
+    : -1;
+  const unreachedPhases = terminal && currentPhaseIndex >= 0
+    ? workflow.phases.slice(currentPhaseIndex + 1).filter((phase) => phase.state === "pending")
+    : [];
   const statusTone = workflow.status === "complete"
     ? "text-green"
     : workflow.status === "failed" || workflow.status === "cancelled" || workflow.status === "interrupted"
@@ -239,40 +249,59 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
   return (
     <div className="overflow-hidden rounded-[5px] border border-line2 bg-raise">
       <div className="border-b border-line px-3 py-2.5">
-        <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="flex w-full items-center gap-2 text-left"
+          title={expanded ? (zh ? "收起任务详情" : "Collapse task details") : (zh ? "展开任务详情" : "Expand task details")}
+        >
+          <Icon name="chevronRight" size={9} className={`shrink-0 text-faint transition-transform ${expanded ? "rotate-90" : ""}`} />
           <Icon name="search" size={11} className={statusTone} />
           <p className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-fg2">{workflow.name}</p>
           <span className={`font-mono text-[8.5px] tracking-[0.08em] ${statusTone}`}>{workflow.status.toUpperCase()}</span>
-        </div>
-        {workflow.objective && <p className="mt-1.5 line-clamp-3 text-[10.5px] leading-relaxed text-mute">{workflow.objective}</p>}
+        </button>
+        {workflow.objective && <p className={`mt-1.5 text-[10.5px] leading-relaxed text-mute ${expanded ? "line-clamp-3" : "truncate"}`}>{workflow.objective}</p>}
         <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[8px] text-faint">
           <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">{workflow.foreground ? "FOREGROUND" : "BACKGROUND"}</span>
           {workflow.currentPhase && <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">{workflow.currentPhase}</span>}
           <span className="max-w-[180px] truncate rounded-[3px] border border-line2 px-1.5 py-0.5" title={workflow.runId}>RUN · {workflow.runId}</span>
           <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">REV {workflow.revision}</span>
         </div>
+        {!expanded && <p className="mt-2 font-mono text-[8.5px] text-dim">
+          {workflow.phases.length} {zh ? "个阶段" : "PHASES"} · {workflow.agents.length} {zh ? "个子代理" : "SUBAGENTS"} · {workflow.events.length} {zh ? "条记录" : "EVENTS"}
+        </p>}
       </div>
 
-      {workflow.phases.length > 0 && (
+      {expanded && workflow.phases.length > 0 && (
         <div className="space-y-1 border-b border-line px-3 py-2">
-          {workflow.phases.map((phase, index) => (
+          {workflow.phases.map((phase, index) => {
+            const unreached = terminal && currentPhaseIndex >= 0 && index > currentPhaseIndex && phase.state === "pending";
+            return (
             <div key={`${phase.title}-${index}`} className="flex items-center gap-2">
-              <span className={`h-1.5 w-1.5 rounded-full ${phase.state === "done" ? "bg-green" : phase.state === "active" ? "animate-pulse-dot bg-acc" : "bg-faint"}`} />
+              <span className={`h-1.5 w-1.5 rounded-full ${phase.state === "done" ? "bg-green" : phase.state === "active" ? "animate-pulse-dot bg-acc" : unreached ? "bg-gold/70" : "bg-faint"}`} />
               <span className={`text-[9.5px] ${phase.state === "active" ? "text-fg2" : "text-dim"}`}>{phase.title}</span>
+              {unreached && <span className="font-mono text-[8px] text-gold">{zh ? "未进入" : "NOT REACHED"}</span>}
             </div>
-          ))}
+            );
+          })}
+          {unreachedPhases.length > 0 && <p className="pt-1 text-[8.5px] leading-relaxed text-gold">
+            {zh
+              ? `CLI 在「${workflow.currentPhase}」阶段结束，后续 ${unreachedPhases.map((phase) => phase.title).join(" / ")} 未执行；这通常对应 Partial 结果，不是界面漏报。`
+              : `The CLI ended in ${workflow.currentPhase}; later phases were not reached. This commonly indicates a partial result, not missing UI state.`}
+          </p>}
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-3 py-2 font-mono text-[8.5px] text-dim">
+      {expanded && <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-3 py-2 font-mono text-[8.5px] text-dim">
         <span>{zh ? "活跃代理" : "ACTIVE AGENTS"}</span><span className="text-right text-fg2">{workflow.activeAgents}</span>
         <span>{zh ? "已用代理" : "AGENTS USED"}</span><span className="text-right text-fg2">{workflow.agentsUsed}{workflow.agentBudget !== undefined ? ` / ${workflow.agentBudget}` : ""}</span>
         <span>{zh ? "剩余 / 保留" : "REMAINING / HELD"}</span><span className="text-right text-fg2">{workflow.agentsRemaining ?? "—"} / {workflow.agentsReserved}</span>
         <span>{zh ? "耗时" : "ELAPSED"}</span><span className="text-right text-fg2">{fmtDuration(workflow.elapsedMs)}</span>
         {workflow.agentUsageIncomplete && <><span className="text-gold">{zh ? "用量状态" : "USAGE"}</span><span className="text-right text-gold">{zh ? "仍在汇总" : "PARTIAL"}</span></>}
-      </div>
+      </div>}
 
-      {workflow.agents.length > 0 && (
+      {expanded && workflow.agents.length > 0 && (
         <div className="border-t border-line px-3 py-2">
           <p className="mb-1.5 font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "子代理" : "SUBAGENTS"}</p>
           <div className="space-y-1">
@@ -287,7 +316,11 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
         </div>
       )}
 
-      {workflow.events.length > 0 && (
+      {expanded && workflow.agentTraces && workflow.agentTraces.length > 0 && (
+        <WorkflowAgentTraces traces={workflow.agentTraces} zh={zh} />
+      )}
+
+      {expanded && workflow.events.length > 0 && (
         <div className="border-t border-line px-3 py-2">
           <p className="mb-1.5 font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "运行记录" : "RUN LOG"}</p>
           <div className="max-h-52 space-y-1 overflow-y-auto pr-1">
@@ -302,7 +335,7 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
         </div>
       )}
 
-      {(workflow.currentAgentLabel || workflow.pauseMessage || workflow.resultSummary) && (
+      {expanded && (workflow.currentAgentLabel || workflow.pauseMessage || workflow.resultSummary) && (
         <div className="border-t border-line px-3 py-2 text-[9.5px] leading-relaxed text-mute">
           {workflow.currentAgentLabel && <p>{zh ? "正在运行：" : "Running: "}{workflow.currentAgentLabel}</p>}
           {workflow.pauseMessage && <p className="mt-1 text-gold">{workflow.pauseMessage}</p>}
@@ -310,7 +343,7 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
         </div>
       )}
 
-      {!terminal && (
+      {expanded && !terminal && (
         <div className="flex gap-1 border-t border-line p-2">
           <button
             onClick={() => onAction(paused ? "resume" : "pause")}
@@ -327,6 +360,43 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function WorkflowAgentTraces({ traces, zh }: { traces: NonNullable<WorkflowRun["agentTraces"]>; zh: boolean }) {
+  return (
+    <div className="border-t border-line px-3 py-2">
+      <p className="font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "子代理公开记录" : "PUBLIC SUBAGENT LOGS"}</p>
+      <p className="mt-1 text-[8.5px] leading-relaxed text-dim">
+        {zh ? "来自每个子代理独立保存的 ACP 会话：包含公开输出、思考片段和工具调用；不会伪造 CLI 未公开的内部推理。" : "Replayed from each child ACP session: public output, thought chunks, and tool calls only."}
+      </p>
+      <div className="mt-2 space-y-1.5">
+        {traces.map((trace) => (
+          <details key={trace.childSessionId} className="group rounded-[3px] border border-line2 bg-high/35">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
+              <Icon name="chevronRight" size={8} className="text-faint transition-transform group-open:rotate-90" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-fg2">{trace.label}</span>
+              <span className="font-mono text-[8px] text-dim">{trace.entries.length} {zh ? "条" : "ENTRIES"}</span>
+            </summary>
+            <div className="border-t border-line px-2 py-2">
+              <p className="mb-1.5 break-all font-mono text-[8px] text-faint">{trace.childSessionId}</p>
+              <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                {trace.entries.length === 0 ? <p className="text-[9px] text-dim">{zh ? "该子代理没有可回放的公开明细。" : "No replayable public detail for this subagent."}</p> : trace.entries.map((entry) => (
+                  <div key={entry.id} className="border-l border-line3 pl-2 text-[9px] leading-relaxed">
+                    <p className={`font-mono text-[8px] ${entry.kind === "thinking" ? "text-gold" : entry.kind === "tool" ? "text-acc" : "text-fg2"}`}>
+                      {entry.kind === "thinking" ? (zh ? "思考" : "THINKING") : entry.kind === "tool" ? `TOOL · ${entry.title ?? "tool"}` : entry.kind === "output" ? (zh ? "输出" : "OUTPUT") : (entry.title ?? "EVENT")}
+                      {entry.status && <span className="ml-1 text-faint">· {entry.status}</span>}
+                    </p>
+                    {entry.detail && <p className="mt-0.5 whitespace-pre-wrap break-words text-dim">{entry.detail}</p>}
+                    {entry.timestamp && <p className="mt-0.5 font-mono text-[8px] text-faint">{new Date(entry.timestamp).toLocaleString()}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        ))}
+      </div>
     </div>
   );
 }
