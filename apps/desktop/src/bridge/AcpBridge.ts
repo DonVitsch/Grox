@@ -1395,6 +1395,10 @@ export class AcpBridge implements GrokBridge {
 
     switch (type) {
       case "user_message_chunk": {
+        // The CLI injects workflow-completion prompts into the parent session
+        // so its model can react on the next turn. They explicitly carry this
+        // flag and are not user-authored conversation history.
+        if (bool(record(update._meta)?.hideFromScrollback)) return;
         if (!this.replaying.has(sessionId)) return;
         const combined = combinedDisplayTexts(update.content);
         if (combined) {
