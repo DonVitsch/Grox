@@ -18,6 +18,11 @@ interface Turn {
   promptIndex: number;
 }
 
+// Keep Zustand's selector snapshot referentially stable when this session has
+// never launched a workflow. Creating `[]` in the selector causes React to
+// observe a fresh store snapshot on every render and recurse indefinitely.
+const EMPTY_WORKFLOWS: WorkflowRun[] = [];
+
 // Deep Research has a separate, durable task timeline. Its launch and
 // completion are host-side workflow events, not a normal model turn, so a
 // generic "provider did not expose" process panel would be misleading.
@@ -278,7 +283,7 @@ const MemoTurnGroup = memo(TurnGroup, (previous, next) => {
 
 export function Timeline({ session }: { session: Session }) {
   const { language } = useI18n();
-  const workflows = useDesktop((state) => state.workflows[session.id] ?? []);
+  const workflows = useDesktop((state) => state.workflows[session.id] ?? EMPTY_WORKFLOWS);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   const turns = useMemo(() => groupTurns(session.blocks), [session.blocks]);
