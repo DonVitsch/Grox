@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { Session, SessionBlock } from "../../bridge/types";
+import type { Session, SessionBlock, WorkflowRun } from "../../bridge/types";
 import { useI18n } from "../../lib/i18n";
+import { useDesktop } from "../../state/store";
 import { Icon } from "../fx/Icon";
 import { BlackHole } from "../fx/BlackHole";
 import { AssistantMsg, SystemEvent, UserMsg } from "./blocks";
@@ -21,7 +22,71 @@ interface Turn {
 // completion are host-side workflow events, not a normal model turn, so a
 // generic "provider did not expose" process panel would be misleading.
 function isDeepResearchRequest(block: Extract<SessionBlock, { type: "user" }> | undefined): boolean {
-  return Boolean(block && /^\/deep-research\b/i.test(block.text.trim()));
+  return Boolean(block && /^\/(?:deep-research|workflow\s+grox-deep-research)\b/i.test(block.text.trim()));
+}
+
+function deepResearchQuery(text: string): string | undefined {
+  const visible = text.trim().match(/^\/deep-research\s+(.+)$/i);
+  if (visible?.[1]) return visible[1].trim();
+  const internal = text.trim().match(/^\/workflow\s+grox-deep-research\s+(.+)$/i);
+  if (!internal?.[1]) return undefined;
+  try {
+    const args = JSON.parse(internal[1]) as { query?: unknown };
+    return typeof args.query === "string" ? args.query.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function matchingResearchRun(
+  runs: WorkflowRun[],
+  user: Extract<SessionBlock, { type: "user" }> | undefined,
+): WorkflowRun | undefined {
+  const query = user ? deepResearchQuery(user.text) : undefined;
+  const candidates = runs.filter((run) => run.name === "grox-deep-research");
+  return candidates.find((run) => query && run.objective.trim() === query)
+    ?? candidates.find((run) => !["complete", "failed", "cancelled", "interrupted"].includes(run.status))
+    ?? candidates.at(0);
+}
+
+function DeepResearchToolCard({ run, query }: { run?: WorkflowRun; query?: string }) {
+  const { language } = useI18n();
+  const openTasks = useDesktop((state) => state.setInspectorTab);
+  const state = run?.status ?? "active";
+  const active = !["complete", "failed", "cancelled", "interrupted"].includes(state);
+  const failed = state === "failed";
+  const tone = failed ? "text-red" : active ? "text-acc" : "text-green";
+  const status = failed
+    ? (language === "zh-CN" ? "失败" : "FAILED")
+    : active
+      ? (language === "zh-CN" ? "执行中" : "RUNNING")
+      : state === "cancelled" || state === "interrupted"
+        ? (language === "zh-CN" ? "已停止" : "STOPPED")
+        : (language === "zh-CN" ? "已完成" : "COMPLETE");
+  const phase = run?.currentPhase ?? (language === "zh-CN" ? "等待任务状态" : "WAITING FOR TASK STATUS");
+
+  return (
+    <button
+      type="button"
+      onClick={() => openTasks("tasks")}
+      className="mb-5 flex w-full items-center gap-3 rounded-[5px] border border-line2 bg-raise/35 px-3 py-2.5 text-left transition-colors hover:border-acc/50 hover:bg-acc/5"
+    >
+      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] border border-line2 bg-void ${tone}`}>
+        <Icon name="search" size={13} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="font-mono text-[10.5px] text-fg2">{language === "zh-CN" ? "深度研究" : "DEEP RESEARCH"}</span>
+          <span className={`font-mono text-[8.5px] tracking-[0.08em] ${tone}`}>{status}</span>
+        </span>
+        <span className="mt-0.5 block truncate text-[10px] text-dim">{query || run?.objective || phase}</span>
+      </span>
+      <span className="hidden shrink-0 text-right font-mono text-[8.5px] text-faint sm:block">
+        {phase}<br />{language === "zh-CN" ? "查看任务详情" : "OPEN TASK DETAILS"}
+      </span>
+      <Icon name="chevronRight" size={10} className="shrink-0 text-faint" />
+    </button>
+  );
 }
 
 function groupTurns(blocks: SessionBlock[]): Turn[] {
@@ -97,14 +162,16 @@ interface TurnGroupProps {
   sessionId: string;
   status: Session["status"];
   active: boolean;
+  workflow?: WorkflowRun;
 }
 
-function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
+function TurnGroup({ turn, sessionId, status, active, workflow }: TurnGroupProps) {
   const { language } = useI18n();
   const complete = !active || status === "idle";
   const [processOpen, setProcessOpen] = useState(!complete);
   const user = turn.blocks.find((block): block is Extract<SessionBlock, { type: "user" }> => block.type === "user");
   const deepResearch = isDeepResearchRequest(user);
+  const query = user ? deepResearchQuery(user.text) : undefined;
 
   useEffect(() => {
     if (complete) setProcessOpen(false);
@@ -118,6 +185,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
     return (
       <section className="timeline-turn mb-8">
         {user && <UserMsg block={user} />}
+        {deepResearch && <DeepResearchToolCard run={workflow} query={query} />}
         {!deepResearch && <div className="process-live mb-5">
           <div className="mb-3 flex min-h-8 items-center gap-2">
             <BlackHole size={15} spin />
@@ -174,6 +242,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
   return (
     <section className="timeline-turn mb-8">
       {user && <UserMsg block={user} rewindPromptIndex={turn.promptIndex >= 0 ? turn.promptIndex : undefined} />}
+      {deepResearch && <DeepResearchToolCard run={workflow} query={query} />}
       {!deepResearch && <div className="process-complete mb-5">
         <button className="process-summary" onClick={() => setProcessOpen((open) => !open)}>
           <Icon name={processOpen ? "chevronDown" : "chevronRight"} size={9} className="shrink-0 text-dim" />
@@ -200,7 +269,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
 }
 
 const MemoTurnGroup = memo(TurnGroup, (previous, next) => {
-  if (previous.active !== next.active || previous.sessionId !== next.sessionId) return false;
+  if (previous.active !== next.active || previous.sessionId !== next.sessionId || previous.workflow !== next.workflow) return false;
   if (next.active && previous.status !== next.status) return false;
   if (previous.turn.blocks.length !== next.turn.blocks.length) return false;
   if (previous.turn.promptIndex !== next.turn.promptIndex) return false;
@@ -209,6 +278,7 @@ const MemoTurnGroup = memo(TurnGroup, (previous, next) => {
 
 export function Timeline({ session }: { session: Session }) {
   const { language } = useI18n();
+  const workflows = useDesktop((state) => state.workflows[session.id] ?? []);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   const turns = useMemo(() => groupTurns(session.blocks), [session.blocks]);
@@ -225,5 +295,8 @@ export function Timeline({ session }: { session: Session }) {
 
   if (session.blocks.length === 0) return <div className="flex flex-1 flex-col items-center justify-center gap-4 pb-24"><BlackHole size={44} spin="slow" /><div className="text-center"><p className="text-[14px] text-mute">{language === "zh-CN" ? "任务通道已打开。" : "Mission channel open."}</p><p className="lbl mt-1.5 !text-[10px]">{language === "zh-CN" ? "输入你的第一个请求" : "TRANSMIT YOUR FIRST DIRECTIVE"}</p></div></div>;
 
-  return <div ref={scrollRef} onScroll={() => { const element = scrollRef.current; if (element) followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }} className="flex-1 overflow-y-auto"><div className="mx-auto max-w-[860px] px-8 py-8">{turns.map((turn, index) => <MemoTurnGroup key={turn.id} turn={turn} sessionId={session.id} status={session.status} active={index === turns.length - 1} />)}<div className="h-2" /></div></div>;
+  return <div ref={scrollRef} onScroll={() => { const element = scrollRef.current; if (element) followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }} className="flex-1 overflow-y-auto"><div className="mx-auto max-w-[860px] px-8 py-8">{turns.map((turn, index) => {
+    const user = turn.blocks.find((block): block is Extract<SessionBlock, { type: "user" }> => block.type === "user");
+    return <MemoTurnGroup key={turn.id} turn={turn} sessionId={session.id} status={session.status} active={index === turns.length - 1} workflow={matchingResearchRun(workflows, user)} />;
+  })}<div className="h-2" /></div></div>;
 }

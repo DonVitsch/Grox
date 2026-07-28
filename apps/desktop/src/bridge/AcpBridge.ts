@@ -912,6 +912,10 @@ export class AcpBridge implements GrokBridge {
   private cursors = new Map<string, ContentCursor>();
   private catalogue = new Map<string, SessionMeta>();
   private replaying = new Map<string, Session>();
+  // `session/load` may replay the immutable pre-rewind journal before the
+  // rewind marker. For an in-process rewind, rebuild from the journal suffix
+  // rather than letting that stale replay race the next user prompt.
+  private pendingCanonicalReplays = new Set<string>();
   private usage = new Map<string, Usage>();
   private sessionOptions = new Map<string, PromptOptions>();
   private sessionSetModelUnsupported = false;
@@ -2410,6 +2414,9 @@ export class AcpBridge implements GrokBridge {
       this.captureModelState(response);
       this.captureRuntimeCommands(response);
       await this.refreshSessionInfo(id);
+      if (this.pendingCanonicalReplays.delete(id)) {
+        await this.replayAfterLatestRewind(id, meta.cwd, meta);
+      }
       const replayed = this.replaying.get(id) ?? emptySession(meta);
       const finalized: Session = {
         ...replayed,
@@ -2435,6 +2442,53 @@ export class AcpBridge implements GrokBridge {
     } catch (error) {
       this.replaying.delete(id);
       throw error;
+    }
+  }
+
+  /** Reconstruct only the journal suffix after the latest rewind marker. */
+  private async replayAfterLatestRewind(sessionId: string, cwd: string, meta: SessionMeta): Promise<void> {
+    try {
+      const envelopes: JsonObject[] = [];
+      let offset = 0;
+      for (let page = 0; page < 40; page += 1) {
+        const response = record(await this.request("x.ai/session/updates", {
+          sessionId,
+          cwd,
+          offset,
+          limit: 1_000,
+        }, 2 * 60_000));
+        const updates = array(response?.updates).map(record).filter((entry): entry is JsonObject => Boolean(entry));
+        envelopes.push(...updates);
+        offset += updates.length;
+        if (!bool(response?.hasMore) || updates.length === 0) break;
+      }
+      let marker = -1;
+      for (let index = 0; index < envelopes.length; index += 1) {
+        const update = record(record(envelopes[index].params)?.update);
+        if (string(update?.sessionUpdate) === "rewind_marker") marker = index;
+      }
+      if (marker < 0) return;
+
+      this.flushStreamAppends(sessionId);
+      this.flushToolPatches(sessionId);
+      this.cursors.set(sessionId, { toolBlocks: new Map() });
+      this.replaying.set(sessionId, emptySession(meta));
+      for (const envelope of envelopes.slice(marker + 1)) {
+        const params = record(envelope.params);
+        const update = params && record(params.update);
+        if (!update) continue;
+        const method = string(envelope.method);
+        if (method === "session/update" || method === "x.ai/session/update") {
+          this.handleSessionUpdate(sessionId, update);
+        } else if (method === "x.ai/session_notification") {
+          this.handleXaiUpdate(sessionId, update);
+        }
+      }
+      this.flushStreamAppends(sessionId);
+      this.flushToolPatches(sessionId);
+    } catch {
+      // Keep the normal session/load reconstruction if this optional history
+      // endpoint is unavailable on an older local CLI.
     }
   }
 
@@ -2683,12 +2737,14 @@ export class AcpBridge implements GrokBridge {
   }
 
   async rewind(sessionId: string, targetPromptIndex: number, mode: RewindMode, force: boolean): Promise<RewindResult> {
-    return this.callExtension<RewindResult>("x.ai/rewind/execute", {
+    const result = await this.callExtension<RewindResult>("x.ai/rewind/execute", {
       session_id: sessionId,
       target_prompt_index: targetPromptIndex,
       force,
       mode,
     });
+    if (result.success && mode !== "files_only") this.pendingCanonicalReplays.add(sessionId);
+    return result;
   }
 
   respondPermission(sessionId: string, blockId: string, option: PermissionOption, feedback?: string): void {
