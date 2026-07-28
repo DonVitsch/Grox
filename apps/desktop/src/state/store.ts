@@ -532,8 +532,11 @@ export const useDesktop = create<DesktopState>((set, get) => {
         const sessionComposers = { ...state.sessionComposers, [e.session.id]: composer };
         persistSessionComposers(sessionComposers);
         bridge.setPermissionMode(composer.permissionMode);
+        const nextSessions = Object.fromEntries(
+          Object.entries(sessions).filter(([id]) => !id.startsWith("pending-")),
+        );
         set({
-          sessions: { ...sessions, [e.session.id]: e.session },
+          sessions: { ...nextSessions, [e.session.id]: e.session },
           sessionIndex: nextIndex,
           projects,
           workspace: e.session.cwd,
@@ -801,11 +804,48 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     async newSession() {
+      const pendingId = `pending-${uid()}`;
+      const now = Date.now();
+      set((state) => ({
+        view: "session",
+        activeId: pendingId,
+        sessions: {
+          ...state.sessions,
+          [pendingId]: {
+            id: pendingId,
+            title: "正在创建任务",
+            cwd: state.workspace,
+            createdAt: now,
+            updatedAt: now,
+            model: state.model,
+            blocks: [],
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              costUSD: 0,
+              contextUsed: 0,
+              contextMax: 0,
+              turns: 0,
+            },
+            status: "running",
+          },
+        },
+      }));
       try {
         await bridge.newSession(get().workspace);
         set({ startupError: null });
       } catch (error) {
-        set({ startupError: error instanceof Error ? error.message : String(error) });
+        set((state) => {
+          const sessions = { ...state.sessions };
+          delete sessions[pendingId];
+          return {
+            sessions,
+            activeId: null,
+            view: "home",
+            startupError: error instanceof Error ? error.message : String(error),
+          };
+        });
       }
     },
 

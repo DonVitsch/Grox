@@ -298,12 +298,12 @@ function ProviderAndModels() {
 
   const filteredModels = availableModels.filter((id) => id.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
   const removeProfile = async (id: string, name: string) => {
-    if (!window.confirm(zh ? `删除供应商“${name}”？` : `Delete provider “${name}”?`)) return;
     setBusy(true);
-    setError("");
+    setError(zh ? `正在删除“${name}”…` : `Deleting “${name}”…`);
     try {
       await deleteProfile(id);
       if (editingProfileId === id) startNewProfile();
+      setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

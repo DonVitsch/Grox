@@ -2105,7 +2105,11 @@ export class AcpBridge implements GrokBridge {
     };
     this.knownSessions.add(sessionId);
     this.sessionOptions.set(sessionId, {
-      model: this.modelState.currentId,
+      // The provider process was already launched with the active profile and
+      // session/new selected its effective model. Treat the composer's initial
+      // model as synchronized so the first prompt does not issue a redundant
+      // session/set_model that some compatible providers reject.
+      model: meta.model,
       effort: (localStorage.getItem("grok.effort") as PromptOptions["effort"]) ?? "high",
       mode: "agent",
     });
