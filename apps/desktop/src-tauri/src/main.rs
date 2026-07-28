@@ -433,7 +433,15 @@ fn provision_grox_deep_research_workflow() -> Result<(), String> {
             .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
         use sha2::{Digest as _, Sha256};
         let digest = format!("{:x}", Sha256::digest(&current));
-        if digest == "40fe78048e52316a2c34c743e8584535d01aae8298fd1b5c4390d941a916eb59" {
+        // These are released, byte-for-byte managed workflow revisions.  We
+        // upgrade them in place, but continue to leave a user-edited copy
+        // untouched.  The 0c55 revision contained an unsafe `.reason` getter
+        // after a verifier returned a string instead of the requested map.
+        if [
+            "40fe78048e52316a2c34c743e8584535d01aae8298fd1b5c4390d941a916eb59",
+            "0c55a88505109376b6334760bc5bc01d825cc6c2c41a4bdbee46addb095ad49b",
+            "9e7b534681e3f6a9051d52baaf09acc4f93a9d0606fd12f3172c49c814e433ea",
+        ].contains(&digest.as_str()) {
             return atomic_write(&path, GROX_DEEP_RESEARCH_WORKFLOW);
         }
         return Ok(());

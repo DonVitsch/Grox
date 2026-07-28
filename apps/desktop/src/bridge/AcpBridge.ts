@@ -165,6 +165,12 @@ function isWorkflowLaunchAcknowledgement(text: string): boolean {
   return /^Workflow 'grox-deep-research' started in the background(?:\.|\s)/i.test(text.trim());
 }
 
+function isWorkflowCompletionContinuation(update: JsonObject): boolean {
+  const meta = record(update._meta);
+  const promptId = string(meta?.promptId) ?? string(meta?.prompt_id) ?? string(update.promptId) ?? string(update.prompt_id);
+  return Boolean(promptId && /^workflow-completed-/i.test(promptId));
+}
+
 const uid = () => crypto.randomUUID();
 
 const EMPTY_USAGE: Usage = {
@@ -1386,6 +1392,7 @@ export class AcpBridge implements GrokBridge {
     const update = record(updateValue);
     if (!update) return;
     const type = string(update.sessionUpdate);
+    const workflowCompletionContinuation = isWorkflowCompletionContinuation(update);
     const child = this.workflowChildTraces.get(sessionId);
     if (child && (type === "agent_message_chunk" || type === "agent_thought_chunk" || type === "tool_call" || type === "tool_call_update" || type === "turn_completed")) {
       child.trace = applyWorkflowTraceUpdate(child.trace, update, Date.now());
@@ -1481,6 +1488,11 @@ export class AcpBridge implements GrokBridge {
         return;
       }
       case "agent_thought_chunk": {
+        // The CLI wakes the parent agent after a workflow ends. Its private
+        // follow-up reasoning/tools are implementation detail; the resulting
+        // final report remains in the chat and the auditable workflow trace
+        // remains in the task panel.
+        if (workflowCompletionContinuation) return;
         this.closeUser(sessionId);
         this.closeAssistant(sessionId);
         const delta = contentText(update.content);
@@ -1522,10 +1534,12 @@ export class AcpBridge implements GrokBridge {
         return;
       }
       case "tool_call":
+        if (workflowCompletionContinuation) return;
         this.closeUser(sessionId);
         this.addTool(sessionId, update);
         return;
       case "tool_call_update":
+        if (workflowCompletionContinuation) return;
         this.patchTool(sessionId, update);
         return;
       case "plan": {

@@ -17,6 +17,13 @@ interface Turn {
   promptIndex: number;
 }
 
+// Deep Research has a separate, durable task timeline. Its launch and
+// completion are host-side workflow events, not a normal model turn, so a
+// generic "provider did not expose" process panel would be misleading.
+function isDeepResearchRequest(block: Extract<SessionBlock, { type: "user" }> | undefined): boolean {
+  return Boolean(block && /^\/deep-research\b/i.test(block.text.trim()));
+}
+
 function groupTurns(blocks: SessionBlock[]): Turn[] {
   const turns: Turn[] = [];
   let promptIndex = -1;
@@ -97,6 +104,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
   const complete = !active || status === "idle";
   const [processOpen, setProcessOpen] = useState(!complete);
   const user = turn.blocks.find((block): block is Extract<SessionBlock, { type: "user" }> => block.type === "user");
+  const deepResearch = isDeepResearchRequest(user);
 
   useEffect(() => {
     if (complete) setProcessOpen(false);
@@ -110,7 +118,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
     return (
       <section className="timeline-turn mb-8">
         {user && <UserMsg block={user} />}
-        <div className="process-live mb-5">
+        {!deepResearch && <div className="process-live mb-5">
           <div className="mb-3 flex min-h-8 items-center gap-2">
             <BlackHole size={15} spin />
             <span className="text-[10.5px] font-medium text-fg2">{status === "awaiting_permission" ? (language === "zh-CN" ? "等待批准" : "Awaiting approval") : status === "awaiting_input" ? (language === "zh-CN" ? "等待你的回答" : "Awaiting input") : (language === "zh-CN" ? "Grok 正在处理" : "Grok is working")}</span>
@@ -127,7 +135,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
               </div>
             </div>
           ) : null}
-        </div>
+        </div>}
         {streamingAnswer && <AssistantMsg block={streamingAnswer} />}
       </section>
     );
@@ -166,7 +174,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
   return (
     <section className="timeline-turn mb-8">
       {user && <UserMsg block={user} rewindPromptIndex={turn.promptIndex >= 0 ? turn.promptIndex : undefined} />}
-      <div className="process-complete mb-5">
+      {!deepResearch && <div className="process-complete mb-5">
         <button className="process-summary" onClick={() => setProcessOpen((open) => !open)}>
           <Icon name={processOpen ? "chevronDown" : "chevronRight"} size={9} className="shrink-0 text-dim" />
           <span className="shrink-0 text-[10.5px] font-medium text-fg2">{language === "zh-CN" ? "已处理" : "Processed"}</span>
@@ -183,7 +191,7 @@ function TurnGroup({ turn, sessionId, status, active }: TurnGroupProps) {
           </div>
         )}
         {turnElapsed > 0 && <div className="turn-elapsed"><span>{language === "zh-CN" ? `已处理 ${turnElapsed < 1000 ? `${turnElapsed}ms` : `${(turnElapsed / 1000).toFixed(turnElapsed < 10_000 ? 1 : 0)}s`}` : `Processed in ${(turnElapsed / 1000).toFixed(1)}s`}</span><i /></div>}
-      </div>
+      </div>}
       {unresolved.map((block) => renderBlock(block, sessionId))}
       {finalAssistant && <AssistantMsg block={finalAssistant} />}
       <TurnChangeCard blocks={turn.blocks} promptIndex={turn.promptIndex} />

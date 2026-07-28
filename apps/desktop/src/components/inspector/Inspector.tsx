@@ -383,7 +383,7 @@ function WorkflowAgentRow({
       <div className="border-t border-line px-2 py-2">
         <p className="mb-1.5 break-all font-mono text-[8px] text-faint">{trace.childSessionId} · {trace.entries.length} {zh ? "条公开记录" : "PUBLIC ENTRIES"}</p>
         <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
-          {trace.entries.length === 0 ? <p className="text-[9px] text-dim">{zh ? "该子代理没有可回放的公开明细。" : "No replayable public detail for this subagent."}</p> : trace.entries.map((entry) => (
+          {trace.entries.length === 0 ? <p className={`text-[9px] ${agent.state === "failed" ? "text-red" : "text-dim"}`}>{agent.state === "failed" ? (zh ? "该子代理在产生公开记录前失败；这不是隐藏的思考内容。" : "This subagent failed before producing public entries; this is not hidden reasoning.") : (zh ? "该子代理尚未产生可回放的公开明细。" : "This subagent has not produced replayable public detail yet.")}</p> : trace.entries.map((entry) => (
             <div key={entry.id} className="border-l border-line3 pl-2 text-[9px] leading-relaxed">
               <p className={`font-mono text-[8px] ${entry.kind === "thinking" ? "text-gold" : entry.kind === "tool" ? "text-acc" : "text-fg2"}`}>
                 {entry.kind === "thinking" ? (zh ? "思考" : "THINKING") : entry.kind === "tool" ? `TOOL · ${entry.title ?? "tool"}` : entry.kind === "output" ? (zh ? "输出" : "OUTPUT") : (entry.title ?? "EVENT")}
