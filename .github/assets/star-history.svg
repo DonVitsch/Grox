@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="title desc">
   <title id="title">dandandujie/Grox Star History</title>
-  <desc id="desc">GitHub Star 历史曲线，当前 37 Stars，数据截至 2026-07-27T17:33:05.000Z</desc>
+  <desc id="desc">GitHub Star 历史曲线，当前 38 Stars，数据截至 2026-07-28T05:47:08.000Z</desc>
   <defs>
     <filter id="rough" x="-4%" y="-4%" width="108%" height="108%">
       <feTurbulence type="fractalNoise" baseFrequency="0.008 0.12" numOctaves="2" seed="17" result="noise"/>
@@ -11,7 +11,7 @@
   <g filter="url(#rough)" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <path d="M 86 390 C 225 387, 336 393, 478 390 S 720 393, 926 389" stroke="#111111" stroke-width="4.5"/>
     <path d="M 86 390 C 82 322, 89 254, 85 188 S 89 88, 86 26" stroke="#111111" stroke-width="4.5"/>
-    <path d="M 86.0 390.0 L 148.0 380.9 L 148.2 371.8 L 149.4 362.7 L 150.0 353.6 L 150.3 344.5 L 150.9 335.4 L 151.7 326.3 L 166.0 317.2 L 166.2 308.1 L 168.1 299.0 L 174.2 289.9 L 187.4 280.8 L 196.4 271.7 L 207.7 262.6 L 214.9 253.5 L 215.4 244.4 L 223.1 235.3 L 243.2 226.2 L 261.1 217.1 L 277.7 208.0 L 293.1 198.9 L 309.4 189.8 L 316.4 180.7 L 329.8 171.6 L 512.6 162.5 L 521.7 153.4 L 611.8 144.3 L 692.0 135.2 L 695.5 126.1 L 726.1 117.0 L 727.2 107.9 L 727.2 98.8 L 727.4 89.7 L 800.5 80.6 L 870.0 71.5 L 894.3 62.4 L 926.0 53.3 L 926.0 53.3" stroke="#e84424" stroke-width="4" opacity="0.98"/>
+    <path d="M 86.0 390.0 L 144.7 380.9 L 144.9 371.8 L 146.0 362.7 L 146.6 353.6 L 146.9 344.5 L 147.4 335.4 L 148.1 326.3 L 161.7 317.2 L 161.9 308.1 L 163.7 299.0 L 169.4 289.9 L 181.9 280.8 L 190.5 271.7 L 201.1 262.6 L 208.0 253.5 L 208.4 244.4 L 215.7 235.3 L 234.8 226.2 L 251.7 217.1 L 267.4 208.0 L 282.0 198.9 L 297.4 189.8 L 304.1 180.7 L 316.7 171.6 L 489.7 162.5 L 498.3 153.4 L 583.5 144.3 L 659.5 135.2 L 662.8 126.1 L 691.7 117.0 L 692.8 107.9 L 692.8 98.8 L 692.9 89.7 L 762.2 80.6 L 827.9 71.5 L 850.9 62.4 L 880.9 53.3 L 926.0 44.2 L 926.0 44.2" stroke="#e84424" stroke-width="4" opacity="0.98"/>
   </g>
   <text x="73" y="306.0" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">10</text>
   <text x="73" y="215.0" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">20</text>
@@ -21,9 +21,9 @@
   <text x="226.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Mon 20</text>
   <text x="366.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Tue 21</text>
   <text x="506.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Thu 23</text>
-  <text x="646.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Fri 24</text>
+  <text x="646.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Sat 25</text>
   <text x="786.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Sun 26</text>
-  <text x="926.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Mon 27</text>
+  <text x="926.0" y="419" text-anchor="middle" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="17">Tue 28</text>
   <text x="480" y="462" text-anchor="middle" fill="#111111" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="22">Date</text>
   <text x="29" y="208" text-anchor="middle" fill="#111111" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="22" transform="rotate(-90 29 208)">GitHub Stars</text>
   <polygon points="746.0,438.0 748.8,446.1 757.4,446.3 750.6,451.5 753.1,459.7 746.0,454.8 738.9,459.7 741.4,451.5 734.6,446.3 743.2,446.1" fill="none" stroke="#70d42c" stroke-width="3" stroke-linejoin="round" filter="url(#rough)"/>
