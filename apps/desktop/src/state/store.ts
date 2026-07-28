@@ -493,7 +493,15 @@ export const useDesktop = create<DesktopState>((set, get) => {
           ? current.filter((run) => run.runId !== e.workflow.runId)
           : [...current.filter((run) => run.runId !== e.workflow.runId), e.workflow]
               .sort((a, b) => Number(isWorkflowTerminal(a.status)) - Number(isWorkflowTerminal(b.status)));
-        set({ workflows: { ...state.workflows, [e.sessionId]: next } });
+        // Background commands (notably /deep-research) return immediately.
+        // Surface their live run in the GUI as soon as the first update
+        // arrives, instead of leaving the user to discover the hidden panel.
+        set({
+          workflows: { ...state.workflows, [e.sessionId]: next },
+          ...(state.activeId === e.sessionId && e.workflow.status !== "cleared"
+            ? { inspectorOpen: true, inspectorTab: "tasks" as InspectorTab }
+            : {}),
+        });
         break;
       }
       case "session_meta": {

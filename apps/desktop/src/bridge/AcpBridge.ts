@@ -583,13 +583,13 @@ function applyCommandTags(commands: SlashCommand[], tags: Map<string, string>): 
 }
 
 function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
-  const runId = string(update.runId) ?? string(update.run_id);
+  const runId = string(update.runId) ?? string(update.run_id) ?? string(update.workflowRunId) ?? string(update.workflow_run_id);
   if (!runId) return undefined;
   const phases = array(update.phases).flatMap((entry) => {
     const phase = record(entry);
-    const title = string(phase?.title);
+    const title = string(phase?.title) ?? string(phase?.name);
     if (!phase || !title) return [];
-    const rawState = string(phase.state);
+    const rawState = string(phase.state) ?? string(phase.status);
     const state: WorkflowRun["phases"][number]["state"] =
       rawState === "active" || rawState === "done" ? rawState : "pending";
     return [{ title, state }];
@@ -615,7 +615,10 @@ function mapWorkflowRun(update: JsonObject): WorkflowRun | undefined {
     revision: number(update.revision) ?? 0,
     name: string(update.name) ?? "workflow",
     objective: string(update.objective) ?? "",
-    status: string(update.status) ?? "active",
+    status: (() => {
+      const raw = string(update.status) ?? "active";
+      return raw === "completed" || raw === "succeeded" ? "complete" : raw;
+    })(),
     foreground: bool(update.foreground) ?? false,
     phases,
     currentPhase: string(update.currentPhase) ?? string(update.current_phase),

@@ -99,6 +99,7 @@ export function Composer() {
     { id: "/auto", hint: language === "zh-CN" ? "自动批准安全工具" : "auto-approve safe tools", run: () => setPermissionMode(permissionMode === "auto" ? "default" : "auto") },
     { id: "/always-approve", hint: language === "zh-CN" ? "切换始终批准" : "toggle always approve", run: () => setPermissionMode(permissionMode === "bypass" ? "default" : "bypass") },
     { id: "/tasks", hint: language === "zh-CN" ? "查看任务和工具活动" : "show tasks and tool activity", run: () => setInspectorTab("tasks") },
+    { id: "/workflows", hint: language === "zh-CN" ? "打开后台工作流面板（深度研究进度）" : "open background workflow runs", run: () => setInspectorTab("tasks") },
     { id: "/context", hint: language === "zh-CN" ? "查看上下文和用量" : "show context and usage", run: () => setInspectorTab("usage") },
     { id: "/skills", hint: language === "zh-CN" ? "管理 Skill" : "manage skills", run: () => openExtensionSettings("skills") },
     { id: "/mcps", hint: language === "zh-CN" ? "管理 MCP Server" : "manage MCP servers", run: () => openExtensionSettings("mcp") },
@@ -184,6 +185,14 @@ export function Composer() {
   const send = () => {
     const t = text.trim();
     if ((!t && attachments.length === 0) || running || readingFiles) return;
+    if (t === "/workflow" || t === "/workflows") {
+      setInspectorTab("tasks");
+      setText("");
+      return;
+    }
+    if (/^\/deep-research(?:\s|$)/i.test(t)) {
+      setInspectorTab("tasks");
+    }
     const modeCommand = t.match(/^\/(plan|agent|ask)(?:\s+([\s\S]+))?$/i);
     if (modeCommand?.[2]) {
       const nextMode = modeCommand[1].toLowerCase() as "plan" | "agent" | "ask";
