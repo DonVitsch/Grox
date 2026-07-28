@@ -211,6 +211,16 @@ const MAX_TOOL_TEXT = 128 * 1024;
 const MAX_JSON_NODES = 5_000;
 const MAX_JSON_ARRAY_ITEMS = 200;
 const MAX_TERMINAL_LINES = 2_000;
+const REWOUND_SESSIONS_STORAGE_KEY = "grox.rewoundSessions";
+
+function loadRewoundSessionIds(): Set<string> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(REWOUND_SESSIONS_STORAGE_KEY) ?? "[]") as unknown;
+    return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
 
 function truncateText(value: string, limit = MAX_TOOL_TEXT): string {
   if (value.length <= limit) return value;
@@ -938,6 +948,11 @@ export class AcpBridge implements GrokBridge {
   // rewind marker. For an in-process rewind, rebuild from the journal suffix
   // rather than letting that stale replay race the next user prompt.
   private pendingCanonicalReplays = new Set<string>();
+  // `session/load` can continue delivering its pre-rewind journal after its
+  // RPC resolves. Keep these sessions on their canonical branch until the
+  // user starts a fresh prompt, including after an app restart.
+  private rewoundSessions = loadRewoundSessionIds();
+  private canonicalReplaySessions = new Set<string>();
   private usage = new Map<string, Usage>();
   private sessionOptions = new Map<string, PromptOptions>();
   private sessionSetModelUnsupported = false;
@@ -1432,10 +1447,28 @@ export class AcpBridge implements GrokBridge {
     }
   }
 
+  private rememberRewoundSession(sessionId: string) {
+    this.rewoundSessions.add(sessionId);
+    localStorage.setItem(REWOUND_SESSIONS_STORAGE_KEY, JSON.stringify([...this.rewoundSessions].slice(-500)));
+  }
+
+  private forgetRewoundSession(sessionId: string) {
+    if (!this.rewoundSessions.delete(sessionId)) return;
+    localStorage.setItem(REWOUND_SESSIONS_STORAGE_KEY, JSON.stringify([...this.rewoundSessions].slice(-500)));
+  }
+
   private handleSessionUpdate(sessionId: string, updateValue: unknown) {
     const update = record(updateValue);
     if (!update) return;
     const type = string(update.sessionUpdate);
+    if (type === "rewind_marker") {
+      this.rememberRewoundSession(sessionId);
+      return;
+    }
+    // `session/load` streams the historical journal independently of its RPC
+    // result. Once a rewind has succeeded, those late events are all dead
+    // branch data; only our explicit canonical replay may repopulate state.
+    if (this.rewoundSessions.has(sessionId) && !this.canonicalReplaySessions.has(sessionId)) return;
     const workflowCompletionContinuation = isWorkflowCompletionContinuation(update);
     const completionRunId = workflowCompletionRunId(update);
     const cancelledWorkflowCompletion = Boolean(
@@ -1725,6 +1758,11 @@ export class AcpBridge implements GrokBridge {
     const update = record(updateValue);
     if (!update) return;
     const type = string(update.sessionUpdate);
+    if (type === "rewind_marker") {
+      this.rememberRewoundSession(sessionId);
+      return;
+    }
+    if (this.rewoundSessions.has(sessionId) && !this.canonicalReplaySessions.has(sessionId)) return;
     const child = this.workflowChildTraces.get(sessionId);
     if (child && (type === "agent_message_chunk" || type === "agent_thought_chunk" || type === "tool_call" || type === "tool_call_update" || type === "turn_completed")) {
       child.trace = applyWorkflowTraceUpdate(child.trace, update, Date.now());
@@ -2470,7 +2508,7 @@ export class AcpBridge implements GrokBridge {
       this.captureModelState(response);
       this.captureRuntimeCommands(response);
       await this.refreshSessionInfo(id);
-      if (this.pendingCanonicalReplays.delete(id)) {
+      if (this.pendingCanonicalReplays.delete(id) || this.rewoundSessions.has(id)) {
         await this.replayAfterLatestRewind(id, meta.cwd, meta);
       }
       const replayed = this.replaying.get(id) ?? emptySession(meta);
@@ -2535,16 +2573,21 @@ export class AcpBridge implements GrokBridge {
       this.cursors.set(sessionId, { toolBlocks: new Map() });
       this.replaying.set(sessionId, emptySession(meta));
       const liveEnvelopes = marker >= 0 ? envelopes.slice(marker + 1) : envelopes;
-      for (const envelope of liveEnvelopes) {
-        const params = record(envelope.params);
-        const update = params && record(params.update);
-        if (!update) continue;
-        const method = string(envelope.method);
-        if (method === "session/update" || method === "x.ai/session/update") {
-          this.handleSessionUpdate(sessionId, update);
-        } else if (method === "x.ai/session_notification") {
-          this.handleXaiUpdate(sessionId, update);
+      this.canonicalReplaySessions.add(sessionId);
+      try {
+        for (const envelope of liveEnvelopes) {
+          const params = record(envelope.params);
+          const update = params && record(params.update);
+          if (!update) continue;
+          const method = string(envelope.method);
+          if (method === "session/update" || method === "x.ai/session/update") {
+            this.handleSessionUpdate(sessionId, update);
+          } else if (method === "x.ai/session_notification") {
+            this.handleXaiUpdate(sessionId, update);
+          }
         }
+      } finally {
+        this.canonicalReplaySessions.delete(sessionId);
       }
       this.flushStreamAppends(sessionId);
       this.flushToolPatches(sessionId);
@@ -2700,6 +2743,9 @@ export class AcpBridge implements GrokBridge {
 
   async prompt(sessionId: string, text: string, options: PromptOptions): Promise<void> {
     await this.ready;
+    // A new user prompt begins the new branch. It is the only event allowed
+    // to lift the rewind isolation gate.
+    this.forgetRewoundSession(sessionId);
     this.activePromptSessions.add(sessionId);
     this.knownSessions.add(sessionId);
     const sessionCwd = this.catalogue.get(sessionId)?.cwd;
@@ -2841,7 +2887,10 @@ export class AcpBridge implements GrokBridge {
       force,
       mode,
     });
-    if (result.success && mode !== "files_only") this.pendingCanonicalReplays.add(sessionId);
+    if (result.success && mode !== "files_only") {
+      this.rememberRewoundSession(sessionId);
+      this.pendingCanonicalReplays.add(sessionId);
+    }
     return result;
   }
 
