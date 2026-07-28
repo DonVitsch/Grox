@@ -2238,9 +2238,54 @@ export class AcpBridge implements GrokBridge {
       this.knownSessions.add(id);
       this.emit({ type: "session_ready", session: finalized });
       this.emit({ type: "available_commands", sessionId: id, commands: this.runtimeCommands });
+      // Restored workflow actors emit a current snapshot, but older CLI
+      // versions may have written the detailed updates only to JSONL. Read
+      // those public envelopes in the background so opening an old session
+      // reconstructs its deep-research task archive as well.
+      void this.hydrateWorkflowHistory(id, meta.cwd);
     } catch (error) {
       this.replaying.delete(id);
       throw error;
+    }
+  }
+
+  private async hydrateWorkflowHistory(sessionId: string, cwd: string): Promise<void> {
+    try {
+      const collected = new Map<string, WorkflowRun>();
+      let offset = 0;
+      for (let page = 0; page < 40; page += 1) {
+        const response = record(await this.request("x.ai/session/updates", {
+          sessionId,
+          cwd,
+          offset,
+          limit: 1_000,
+        }, 2 * 60_000));
+        const updates = array(response?.updates);
+        for (const entry of updates) {
+          const envelope = record(entry);
+          const params = record(envelope?.params);
+          const update = record(params?.update);
+          if (string(update?.sessionUpdate) !== "workflow_updated") continue;
+          const workflow = update && mapWorkflowRun(update);
+          if (!workflow) continue;
+          const previous = collected.get(workflow.runId);
+          collected.set(workflow.runId, previous ? {
+            ...previous,
+            ...workflow,
+            phases: workflow.phases.length > 0 ? workflow.phases : previous.phases,
+            agents: workflow.agents.length > 0 ? workflow.agents : previous.agents,
+            events: [...previous.events, ...workflow.events],
+          } : workflow);
+        }
+        offset += updates.length;
+        if (!bool(response?.hasMore) || updates.length === 0) break;
+      }
+      for (const workflow of collected.values()) {
+        this.emit({ type: "workflow_update", sessionId, workflow });
+      }
+    } catch {
+      // Bulk session history is an optional extension. Live workflow updates
+      // and locally archived runs remain available on older CLI builds.
     }
   }
 
