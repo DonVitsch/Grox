@@ -1481,8 +1481,13 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     async executeRewind(point, mode) {
-      const { activeId, sessions } = get();
+      const { activeId, sessions, sessionComposers } = get();
       if (!activeId || sessions[activeId]?.status !== "idle") throw new Error("请等待当前请求完成后再回退");
+      // Rewind results can contain server-side workflow reminders instead of
+      // the user's old prompt. A rewind must preserve the unsent composer as
+      // it was (including an intentionally empty composer), never turn that
+      // protocol text into a draft the user appears to have written.
+      const draftBeforeRewind = sessionComposers[activeId]?.text ?? "";
       const result = await bridge.rewind(activeId, point.prompt_index, mode, true);
       if (!result.success) {
         throw new Error(result.error || `回退存在 ${result.conflicts.length} 个文件冲突`);
@@ -1513,7 +1518,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
         }
       }
       await bridge.loadSession(activeId);
-      if (mode !== "files_only") get().setDraft(result.prompt_text ?? point.prompt_preview ?? "");
+      if (mode !== "files_only") get().setDraft(draftBeforeRewind);
       return result;
     },
 

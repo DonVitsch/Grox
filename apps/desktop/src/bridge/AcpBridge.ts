@@ -149,6 +149,18 @@ function completeDeepResearchPrompt(text: string): string {
   return `/workflow grox-deep-research ${JSON.stringify({ query: match[1]?.trim() ?? "" })}`;
 }
 
+/** Keep Grox's transport-only workflow alias out of the conversation replay. */
+function displayDeepResearchPrompt(text: string): string {
+  const match = text.trim().match(/^\/workflow\s+grox-deep-research\s+([\s\S]+)$/i);
+  if (!match) return text;
+  try {
+    const args = JSON.parse(match[1]) as { query?: unknown };
+    return typeof args.query === "string" ? `/deep-research${args.query ? ` ${args.query}` : ""}` : text;
+  } catch {
+    return text;
+  }
+}
+
 const uid = () => crypto.randomUUID();
 
 const EMPTY_USAGE: Usage = {
@@ -1383,13 +1395,14 @@ export class AcpBridge implements GrokBridge {
         const combined = combinedDisplayTexts(update.content);
         if (combined) {
           for (const text of combined) {
+            const displayText = displayDeepResearchPrompt(text);
             const blockId = uid();
             cursor.userId = blockId;
-            cursor.userText = text;
+            cursor.userText = displayText;
             this.emit({
               type: "block_add",
               sessionId,
-              block: { type: "user", id: blockId, text, ts: Date.now() },
+              block: { type: "user", id: blockId, text: displayText, ts: Date.now() },
             });
           }
           cursor.userOpen = true;
@@ -1412,14 +1425,14 @@ export class AcpBridge implements GrokBridge {
         if (beginsNewPrompt) {
           const nextUserId = uid();
           cursor.userId = nextUserId;
-          cursor.userText = delta;
+          cursor.userText = displayDeepResearchPrompt(delta);
           this.emit({
             type: "block_add",
             sessionId,
-            block: { type: "user", id: nextUserId, text: delta, ts: Date.now() },
+            block: { type: "user", id: nextUserId, text: cursor.userText, ts: Date.now() },
           });
         } else {
-          cursor.userText = `${cursor.userText ?? ""}${delta}`;
+          cursor.userText = displayDeepResearchPrompt(`${cursor.userText ?? ""}${delta}`);
           this.emit({
             type: "block_patch",
             sessionId,
