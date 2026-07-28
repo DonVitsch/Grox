@@ -2452,7 +2452,14 @@ export class AcpBridge implements GrokBridge {
     }
   }
 
-  /** Reconstruct only the journal suffix after the latest rewind marker. */
+  /**
+   * Reconstruct a rewound session from the canonical update extension.
+   *
+   * Current CLI builds already remove dead rewind branches from this response;
+   * older ones still include the marker, so retain the suffix fallback. In
+   * both cases this stream, not `session/load`, is the source of truth after a
+   * rewind.
+   */
   private async replayAfterLatestRewind(sessionId: string, cwd: string, meta: SessionMeta): Promise<void> {
     try {
       const envelopes: JsonObject[] = [];
@@ -2474,13 +2481,12 @@ export class AcpBridge implements GrokBridge {
         const update = record(record(envelopes[index].params)?.update);
         if (string(update?.sessionUpdate) === "rewind_marker") marker = index;
       }
-      if (marker < 0) return;
-
       this.flushStreamAppends(sessionId);
       this.flushToolPatches(sessionId);
       this.cursors.set(sessionId, { toolBlocks: new Map() });
       this.replaying.set(sessionId, emptySession(meta));
-      for (const envelope of envelopes.slice(marker + 1)) {
+      const liveEnvelopes = marker >= 0 ? envelopes.slice(marker + 1) : envelopes;
+      for (const envelope of liveEnvelopes) {
         const params = record(envelope.params);
         const update = params && record(params.update);
         if (!update) continue;
