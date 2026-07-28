@@ -303,21 +303,11 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
 
       {expanded && workflow.agents.length > 0 && (
         <div className="border-t border-line px-3 py-2">
-          <p className="mb-1.5 font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "子代理" : "SUBAGENTS"}</p>
+          <p className="mb-1 text-[8.5px] leading-relaxed text-dim">{zh ? "子代理（展开单个代理可查看公开输出、思考片段与工具调用）" : "SUBAGENTS · expand one for its public output, thought chunks, and tool calls"}</p>
           <div className="space-y-1">
-            {workflow.agents.map((agent) => (
-              <div key={agent.agentId} className="grid grid-cols-[7px_minmax(0,1fr)_auto] items-center gap-2 rounded-[3px] bg-high/45 px-2 py-1.5">
-                <span className={`h-1.5 w-1.5 rounded-full ${agent.state === "running" ? "animate-pulse-dot bg-acc" : agent.state === "complete" || agent.state === "done" ? "bg-green" : agent.state === "failed" ? "bg-red" : "bg-faint"}`} />
-                <div className="min-w-0"><p className="truncate font-mono text-[9px] text-fg2">{agent.label}</p><p className="truncate text-[8.5px] text-dim">{[agent.phase, agent.model].filter(Boolean).join(" · ") || agent.state}</p></div>
-                <span className="text-right font-mono text-[8px] leading-relaxed text-faint">{agent.tokensUsed !== undefined ? `${fmtTokens(agent.tokensUsed)} tok` : ""}{agent.durationMs !== undefined ? <><br />{fmtDuration(agent.durationMs)}</> : null}</span>
-              </div>
-            ))}
+            {workflow.agents.map((agent) => <WorkflowAgentRow key={agent.agentId} agent={agent} trace={workflow.agentTraces?.find((item) => item.agentId === agent.agentId || item.label === agent.label)} zh={zh} />)}
           </div>
         </div>
-      )}
-
-      {expanded && workflow.agentTraces && workflow.agentTraces.length > 0 && (
-        <WorkflowAgentTraces traces={workflow.agentTraces} zh={zh} />
       )}
 
       {expanded && workflow.events.length > 0 && (
@@ -364,40 +354,45 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
   );
 }
 
-function WorkflowAgentTraces({ traces, zh }: { traces: NonNullable<WorkflowRun["agentTraces"]>; zh: boolean }) {
+function WorkflowAgentRow({
+  agent,
+  trace,
+  zh,
+}: {
+  agent: WorkflowRun["agents"][number];
+  trace?: NonNullable<WorkflowRun["agentTraces"]>[number];
+  zh: boolean;
+}) {
+  const summary = (
+    <>
+      <span className={`h-1.5 w-1.5 rounded-full ${agent.state === "running" ? "animate-pulse-dot bg-acc" : agent.state === "complete" || agent.state === "done" ? "bg-green" : agent.state === "failed" ? "bg-red" : "bg-faint"}`} />
+      <div className="min-w-0 flex-1"><p className="truncate font-mono text-[9px] text-fg2">{agent.label}</p><p className="truncate text-[8.5px] text-dim">{[agent.phase, agent.model].filter(Boolean).join(" · ") || agent.state}</p></div>
+      <span className="text-right font-mono text-[8px] leading-relaxed text-faint">{agent.tokensUsed !== undefined ? `${fmtTokens(agent.tokensUsed)} tok` : ""}{agent.durationMs !== undefined ? <><br />{fmtDuration(agent.durationMs)}</> : null}</span>
+    </>
+  );
+  if (!trace) return <div className="grid grid-cols-[7px_minmax(0,1fr)_auto] items-center gap-2 rounded-[3px] bg-high/45 px-2 py-1.5">{summary}</div>;
   return (
-    <div className="border-t border-line px-3 py-2">
-      <p className="font-mono text-[8.5px] tracking-[0.1em] text-faint">{zh ? "子代理公开记录" : "PUBLIC SUBAGENT LOGS"}</p>
-      <p className="mt-1 text-[8.5px] leading-relaxed text-dim">
-        {zh ? "来自每个子代理独立保存的 ACP 会话：包含公开输出、思考片段和工具调用；不会伪造 CLI 未公开的内部推理。" : "Replayed from each child ACP session: public output, thought chunks, and tool calls only."}
-      </p>
-      <div className="mt-2 space-y-1.5">
-        {traces.map((trace) => (
-          <details key={trace.childSessionId} className="group rounded-[3px] border border-line2 bg-high/35">
-            <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
-              <Icon name="chevronRight" size={8} className="text-faint transition-transform group-open:rotate-90" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-fg2">{trace.label}</span>
-              <span className="font-mono text-[8px] text-dim">{trace.entries.length} {zh ? "条" : "ENTRIES"}</span>
-            </summary>
-            <div className="border-t border-line px-2 py-2">
-              <p className="mb-1.5 break-all font-mono text-[8px] text-faint">{trace.childSessionId}</p>
-              <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
-                {trace.entries.length === 0 ? <p className="text-[9px] text-dim">{zh ? "该子代理没有可回放的公开明细。" : "No replayable public detail for this subagent."}</p> : trace.entries.map((entry) => (
-                  <div key={entry.id} className="border-l border-line3 pl-2 text-[9px] leading-relaxed">
-                    <p className={`font-mono text-[8px] ${entry.kind === "thinking" ? "text-gold" : entry.kind === "tool" ? "text-acc" : "text-fg2"}`}>
-                      {entry.kind === "thinking" ? (zh ? "思考" : "THINKING") : entry.kind === "tool" ? `TOOL · ${entry.title ?? "tool"}` : entry.kind === "output" ? (zh ? "输出" : "OUTPUT") : (entry.title ?? "EVENT")}
-                      {entry.status && <span className="ml-1 text-faint">· {entry.status}</span>}
-                    </p>
-                    {entry.detail && <p className="mt-0.5 whitespace-pre-wrap break-words text-dim">{entry.detail}</p>}
-                    {entry.timestamp && <p className="mt-0.5 font-mono text-[8px] text-faint">{new Date(entry.timestamp).toLocaleString()}</p>}
-                  </div>
-                ))}
-              </div>
+    <details className="group rounded-[3px] border border-line2 bg-high/45">
+      <summary className="grid cursor-pointer list-none grid-cols-[8px_7px_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 [&::-webkit-details-marker]:hidden">
+        <Icon name="chevronRight" size={8} className="text-faint transition-transform group-open:rotate-90" />
+        {summary}
+      </summary>
+      <div className="border-t border-line px-2 py-2">
+        <p className="mb-1.5 break-all font-mono text-[8px] text-faint">{trace.childSessionId} · {trace.entries.length} {zh ? "条公开记录" : "PUBLIC ENTRIES"}</p>
+        <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+          {trace.entries.length === 0 ? <p className="text-[9px] text-dim">{zh ? "该子代理没有可回放的公开明细。" : "No replayable public detail for this subagent."}</p> : trace.entries.map((entry) => (
+            <div key={entry.id} className="border-l border-line3 pl-2 text-[9px] leading-relaxed">
+              <p className={`font-mono text-[8px] ${entry.kind === "thinking" ? "text-gold" : entry.kind === "tool" ? "text-acc" : "text-fg2"}`}>
+                {entry.kind === "thinking" ? (zh ? "思考" : "THINKING") : entry.kind === "tool" ? `TOOL · ${entry.title ?? "tool"}` : entry.kind === "output" ? (zh ? "输出" : "OUTPUT") : (entry.title ?? "EVENT")}
+                {entry.status && <span className="ml-1 text-faint">· {entry.status}</span>}
+              </p>
+              {entry.detail && <p className="mt-0.5 whitespace-pre-wrap break-words text-dim">{entry.detail}</p>}
+              {entry.timestamp && <p className="mt-0.5 font-mono text-[8px] text-faint">{new Date(entry.timestamp).toLocaleString()}</p>}
             </div>
-          </details>
-        ))}
+          ))}
+        </div>
       </div>
-    </div>
+    </details>
   );
 }
 

@@ -37,6 +37,11 @@ const GROX_BUILD_COMMIT: &str = env!("GROX_BUILD_COMMIT");
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/dandandujie/Grox/releases/latest";
 const GROK_INSTALL_PS1_URL: &str = "https://x.ai/cli/install.ps1";
 const GROK_INSTALL_SH_URL: &str = "https://x.ai/cli/install.sh";
+// The upstream built-in workflow has early `complete()` branches for empty
+// candidate/verdict sets. Grox routes the built-in slash shortcut to this
+// user-scoped compatibility workflow so every research run reaches Verify and
+// Report, including a useful audit/report for partial evidence.
+const GROX_DEEP_RESEARCH_WORKFLOW: &str = include_str!("../resources/grox-deep-research.rhai");
 const GROX_PRIVACY_ENV: [(&str, &str); 13] = [
     ("GROX_PRIVACY_MODE", "1"),
     // Legacy fallbacks also protect users who point GROK_DESKTOP_CLI at an
@@ -416,6 +421,16 @@ fn grok_home() -> Result<PathBuf, String> {
         .or_else(|| std::env::var_os("HOME"))
         .ok_or_else(|| "无法定位用户目录，请设置 GROK_HOME".to_string())?;
     Ok(PathBuf::from(home).join(".grok"))
+}
+
+fn provision_grox_deep_research_workflow() -> Result<(), String> {
+    let path = grok_home()?.join("workflows").join("grox-deep-research.rhai");
+    if path.exists() {
+        // It belongs to the user once created. Never overwrite a deliberate
+        // local adjustment during a desktop-app update.
+        return Ok(());
+    }
+    atomic_write(&path, GROX_DEEP_RESEARCH_WORKFLOW)
 }
 
 fn read_bounded_text(path: &Path, max_bytes: u64) -> Result<String, String> {
@@ -3112,6 +3127,9 @@ fn main() {
                 window.set_icon(icon)?;
             }
             register_computer_emergency_shortcut(app.handle().clone());
+            if let Err(error) = provision_grox_deep_research_workflow() {
+                eprintln!("grox: 无法安装完整 deep-research 工作流：{error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

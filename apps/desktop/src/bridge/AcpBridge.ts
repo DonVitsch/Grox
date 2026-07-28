@@ -137,6 +137,18 @@ function isInvalidParamsError(error: unknown): boolean {
   return error instanceof Error && /\binvalid params\b/i.test(error.message);
 }
 
+/**
+ * Upstream's built-in /deep-research exits before Verify/Report when an
+ * evidence panel is empty. The native shell provisions a user workflow with
+ * the same research contract but no early terminal branch; preserve the
+ * familiar command while dispatching to that complete pipeline.
+ */
+function completeDeepResearchPrompt(text: string): string {
+  const match = text.trim().match(/^\/deep-research(?:\s+([\s\S]*))?$/i);
+  if (!match) return text;
+  return `/workflow grox-deep-research ${JSON.stringify({ query: match[1]?.trim() ?? "" })}`;
+}
+
 const uid = () => crypto.randomUUID();
 
 const EMPTY_USAGE: Usage = {
@@ -2537,10 +2549,11 @@ export class AcpBridge implements GrokBridge {
         mode: options.mode,
       });
 
+      const dispatchText = completeDeepResearchPrompt(text);
       let promptRpcId: RpcId | undefined;
       const promptRequest = this.requestRaw(ACP_METHODS.sessionPrompt, {
         sessionId,
-        prompt: promptContent(text, options.attachments ?? []),
+        prompt: promptContent(dispatchText, options.attachments ?? []),
       }, 0, (id) => {
         promptRpcId = id;
       });
