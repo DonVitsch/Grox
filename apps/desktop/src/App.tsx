@@ -1,6 +1,6 @@
 /* App shell — window chrome, three-column deck, overlays, keymap. */
 
-import { useEffect } from "react";
+import { Component, useEffect, type ErrorInfo, type ReactNode } from "react";
 import { useDesktop } from "./state/store";
 import { TitleBar } from "./components/chrome/TitleBar";
 import { Sidebar } from "./components/chrome/Sidebar";
@@ -20,6 +20,30 @@ import { useI18n } from "./lib/i18n";
 import { AccountSetup } from "./components/settings/AccountSetup";
 import { UpdateNotice } from "./components/update/UpdateNotice";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Grox UI render failed", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-base px-8 text-center">
+        <BlackHole size={34} />
+        <p className="font-mono text-[12px] text-fg">界面遇到异常，但会话没有被删除</p>
+        <p className="max-w-[680px] break-words font-mono text-[10px] leading-relaxed text-dim">{this.state.error.message}</p>
+        <button onClick={() => window.location.reload()} className="rounded-[5px] border border-line2 px-3 py-2 font-mono text-[10px] text-acc hover:border-acc-dim hover:text-fg">重新载入界面</button>
+      </div>
+    );
+  }
+}
 
 export default function App() {
   const { language } = useI18n();
@@ -76,6 +100,7 @@ export default function App() {
   const inSession = view === "session" && activeId;
 
   return (
+    <AppErrorBoundary>
     <div className="flex h-screen flex-col bg-base">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
@@ -109,5 +134,6 @@ export default function App() {
       <AccountSetup />
       <UpdateNotice />
     </div>
+    </AppErrorBoundary>
   );
 }

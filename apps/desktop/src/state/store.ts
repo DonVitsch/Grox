@@ -416,6 +416,15 @@ function patchTool(
   );
 }
 
+/** Keep only the transcript strictly before the rewind target turn. */
+function blocksBeforePrompt(blocks: SessionBlock[], targetPromptIndex: number): SessionBlock[] {
+  let promptIndex = -1;
+  return blocks.filter((block) => {
+    if (block.type === "user") promptIndex += 1;
+    return promptIndex < targetPromptIndex;
+  });
+}
+
 export const useDesktop = create<DesktopState>((set, get) => {
   const applyEvent = (e: BridgeEvent) => {
     const { sessions, sessionIndex } = get();
@@ -1386,6 +1395,30 @@ export const useDesktop = create<DesktopState>((set, get) => {
       const result = await bridge.rewind(activeId, point.prompt_index, mode, true);
       if (!result.success) {
         throw new Error(result.error || `回退存在 ${result.conflicts.length} 个文件冲突`);
+      }
+      if (mode !== "files_only") {
+        // The extension confirms the rewind before session/load has replayed
+        // the shortened transcript. Remove stale UI blocks immediately, so
+        // later turns never remain visible while the reload is in flight.
+        const state = get();
+        const session = state.sessions[activeId];
+        const nextWorkflows = { ...state.workflows };
+        delete nextWorkflows[activeId];
+        if (session) {
+          set({
+            sessions: {
+              ...state.sessions,
+              [activeId]: {
+                ...session,
+                blocks: blocksBeforePrompt(session.blocks, point.prompt_index),
+                status: "idle",
+              },
+            },
+            workflows: nextWorkflows,
+            planPreviewOpen: false,
+            previewOpen: false,
+          });
+        }
       }
       await bridge.loadSession(activeId);
       if (mode !== "files_only") get().setDraft(result.prompt_text ?? point.prompt_preview ?? "");

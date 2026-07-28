@@ -23,7 +23,9 @@ export function Home() {
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
   const [readingFiles, setReadingFiles] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const sessionIndex = useDesktop((s) => s.sessionIndex);
   const sessions = useDesktop((s) => s.sessions);
   const newSession = useDesktop((s) => s.newSession);
@@ -41,12 +43,48 @@ export function Home() {
   const setEffort = useDesktop((s) => s.setEffort);
   const setPermissionMode = useDesktop((s) => s.setPermissionMode);
   const setMode = useDesktop((s) => s.setMode);
+  const setSettingsOpen = useDesktop((s) => s.setSettingsOpen);
 
   const recent = [...sessionIndex].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 4);
 
+  const slashCommands = [
+    { id: "/plan", hint: language === "zh-CN" ? "计划模式 — 操作前先规划" : "Plan mode — think before acting" },
+    { id: "/agent", hint: language === "zh-CN" ? "Agent 模式 — 完整工具访问" : "Agent mode — full tool access" },
+    { id: "/ask", hint: language === "zh-CN" ? "问答模式 — 不编辑文件" : "Ask mode — answers, no edits" },
+    { id: "/deep-research", hint: language === "zh-CN" ? "深度研究 — 后台检索、核验并生成带引用报告" : "Deep research — background research with cited report" },
+    { id: "/settings", hint: language === "zh-CN" ? "打开设置" : "Open settings" },
+  ];
+  const slashOpen = q.startsWith("/") && !q.includes(" ");
+  const slashMatches = slashOpen
+    ? slashCommands.filter((command) => command.id.slice(1).startsWith(q.slice(1).toLowerCase()))
+    : [];
+
+  const chooseSlash = (id: string) => {
+    if (id === "/settings") {
+      setSettingsOpen(true);
+      setQ("");
+      return;
+    }
+    setQ(`${id} `);
+    requestAnimationFrame(() => promptRef.current?.focus());
+  };
+
   const launch = async () => {
-    const prompt = q.trim();
+    const rawPrompt = q.trim();
+    const modeCommand = rawPrompt.match(/^\/(plan|agent|ask)(?:\s+([\s\S]+))?$/i);
+    if (modeCommand && !modeCommand[2]?.trim()) {
+      setMode(modeCommand[1].toLowerCase() as "plan" | "agent" | "ask");
+      setQ("");
+      return;
+    }
+    if (rawPrompt === "/settings") {
+      setSettingsOpen(true);
+      setQ("");
+      return;
+    }
+    const prompt = modeCommand?.[2]?.trim() ?? rawPrompt;
     if ((!prompt && attachments.length === 0) || readingFiles) return;
+    if (modeCommand) setMode(modeCommand[1].toLowerCase() as "plan" | "agent" | "ask");
     await newSession({ text: prompt, attachments });
     setQ("");
     setAttachments([]);
@@ -147,22 +185,30 @@ export function Home() {
         )}
 
         {/* pre-project uplink */}
-        <div className="mt-8 w-[680px] overflow-visible rounded-[8px] border border-line2 bg-raise transition-colors focus-within:border-acc-dim">
+        <div className="relative mt-8 w-[680px] overflow-visible rounded-[8px] border border-line2 bg-raise transition-colors focus-within:border-acc-dim">
           <input ref={fileRef} type="file" multiple className="hidden" onChange={(event) => { void appendFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
           {attachments.length > 0 && <div className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">{attachments.map((attachment) => <div key={attachment.id} className="flex h-8 max-w-[190px] items-center gap-2 rounded-[4px] border border-line2 bg-high/70 px-2">{attachment.kind === "image" && attachment.data ? <img src={`data:${attachment.mime};base64,${attachment.data}`} alt="" className="h-5 w-5 rounded-[2px] object-cover" /> : <Icon name="file" size={10} className="text-dim" />}<span className="min-w-0 flex-1 truncate font-mono text-[9px] text-fg2">{attachment.name}</span><button onClick={() => setAttachments((items) => items.filter((item) => item.id !== attachment.id))} className="text-faint hover:text-fg" title={language === "zh-CN" ? "移除" : "Remove"}><Icon name="x" size={8} /></button></div>)}</div>}
           <textarea
+            ref={promptRef}
             value={q}
-            onChange={(event) => setQ(event.target.value)}
+            onChange={(event) => { setQ(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => {
               const images = Array.from(event.clipboardData.items).filter((item) => item.kind === "file" && item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
               if (images.length > 0) { event.preventDefault(); void appendFiles(images); }
             }}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void launch(); } }}
+            onKeyDown={(event) => {
+              if (slashMatches.length > 0 && event.key === "ArrowDown") { event.preventDefault(); setSlashIndex((index) => (index + 1) % slashMatches.length); return; }
+              if (slashMatches.length > 0 && event.key === "ArrowUp") { event.preventDefault(); setSlashIndex((index) => (index - 1 + slashMatches.length) % slashMatches.length); return; }
+              if (slashMatches.length > 0 && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); chooseSlash(slashMatches[slashIndex]?.id ?? slashMatches[0]?.id ?? ""); return; }
+              if (event.key === "Escape" && slashMatches.length > 0) { event.preventDefault(); setQ(""); return; }
+              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void launch(); }
+            }}
             rows={2}
             placeholder={language === "zh-CN" ? "描述任务；可直接粘贴截图或上传文件…" : "Describe the mission; paste screenshots or attach files…"}
             disabled={auth.required}
             className="block min-h-[58px] w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[14px] leading-relaxed text-fg placeholder:text-faint focus:outline-none disabled:opacity-50"
           />
+          {slashMatches.length > 0 && <div className="absolute z-30 mt-1 w-[min(520px,calc(100%-32px))] rounded-[6px] border border-line2 bg-raise p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.45)]">{slashMatches.map((command, index) => <button key={command.id} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseSlash(command.id)} className={`flex w-full items-center gap-3 rounded-[4px] px-3 py-2 text-left ${index === slashIndex ? "bg-high text-fg" : "text-dim hover:bg-high hover:text-fg2"}`}><span className="font-mono text-[10px] text-acc">{command.id}</span><span className="min-w-0 flex-1 truncate text-[10px]">{command.hint}</span></button>)}</div>}
           <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-2.5 pt-1">
             <ProviderSwitcher />
             <ChipSelect label={<span className="text-fg2">{currentModel?.label ?? model.toUpperCase()}</span>} items={models.map((item) => ({ id: item.id, label: item.label, hint: item.tagline }))} activeId={model} onSelect={setModel} width={240} />
