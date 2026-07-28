@@ -2504,6 +2504,7 @@ export class AcpBridge implements GrokBridge {
       const collected = new Map<string, WorkflowRun>();
       const tracesByRun = new Map<string, Map<string, WorkflowAgentTrace>>();
       const childRunIds = new Map<string, string>();
+      const discardedRunIds = new Set<string>();
       let offset = 0;
       for (let page = 0; page < 40; page += 1) {
         const response = record(await this.request("x.ai/session/updates", {
@@ -2519,6 +2520,19 @@ export class AcpBridge implements GrokBridge {
           const update = record(params?.update);
           if (!update) continue;
           const type = string(update.sessionUpdate);
+          if (type === "rewind_marker") {
+            // Workflow status is part of the conversation branch. A rewind
+            // invalidates every task that occurred before the marker; do not
+            // resurrect those cards while hydrating historical ACP updates.
+            for (const runId of collected.keys()) discardedRunIds.add(runId);
+            collected.clear();
+            tracesByRun.clear();
+            childRunIds.clear();
+            for (const [childSessionId, state] of this.workflowChildTraces) {
+              if (state.sessionId === sessionId) this.workflowChildTraces.delete(childSessionId);
+            }
+            continue;
+          }
           if (type === "workflow_updated") {
             const workflow = mapWorkflowRun(update);
             if (!workflow) continue;
@@ -2553,6 +2567,28 @@ export class AcpBridge implements GrokBridge {
         }
         offset += updates.length;
         if (!bool(response?.hasMore) || updates.length === 0) break;
+      }
+      for (const runId of discardedRunIds) {
+        this.emit({
+          type: "workflow_update",
+          sessionId,
+          workflow: {
+            runId,
+            revision: Number.MAX_SAFE_INTEGER,
+            name: "rewound-workflow",
+            objective: "",
+            status: "cleared",
+            foreground: false,
+            phases: [],
+            agents: [],
+            events: [],
+            activeAgents: 0,
+            agentsUsed: 0,
+            agentsReserved: 0,
+            agentUsageIncomplete: false,
+            elapsedMs: 0,
+          },
+        });
       }
       for (const workflow of collected.values()) {
         const traces = tracesByRun.get(workflow.runId);
