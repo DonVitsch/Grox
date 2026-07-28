@@ -161,6 +161,10 @@ function displayDeepResearchPrompt(text: string): string {
   }
 }
 
+function isWorkflowLaunchAcknowledgement(text: string): boolean {
+  return /^Workflow 'grox-deep-research' started in the background(?:\.|\s)/i.test(text.trim());
+}
+
 const uid = () => crypto.randomUUID();
 
 const EMPTY_USAGE: Usage = {
@@ -1451,6 +1455,10 @@ export class AcpBridge implements GrokBridge {
         this.closeUser(sessionId);
         this.closeThinking(sessionId);
         const delta = contentText(update.content);
+        // Starting the workflow is already represented by the live task card.
+        // Do not manufacture a redundant assistant bubble for the CLI's
+        // boilerplate acknowledgement; the eventual report remains visible.
+        if (!cursor.assistantId && isWorkflowLaunchAcknowledgement(delta)) return;
         if (!cursor.assistantId) {
           cursor.assistantId = uid();
           this.emit({

@@ -426,8 +426,16 @@ fn grok_home() -> Result<PathBuf, String> {
 fn provision_grox_deep_research_workflow() -> Result<(), String> {
     let path = grok_home()?.join("workflows").join("grox-deep-research.rhai");
     if path.exists() {
-        // It belongs to the user once created. Never overwrite a deliberate
-        // local adjustment during a desktop-app update.
+        // Upgrade only the exact first managed copy that Grox wrote in the
+        // preceding release. Any hand-edited or independently-created file
+        // remains entirely under the user's control.
+        let current = fs::read(&path)
+            .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+        use sha2::{Digest as _, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&current));
+        if digest == "40fe78048e52316a2c34c743e8584535d01aae8298fd1b5c4390d941a916eb59" {
+            return atomic_write(&path, GROX_DEEP_RESEARCH_WORKFLOW);
+        }
         return Ok(());
     }
     atomic_write(&path, GROX_DEEP_RESEARCH_WORKFLOW)
