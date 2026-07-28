@@ -16,6 +16,8 @@ import { usePreferences } from "../../state/preferences";
 import { useI18n } from "../../lib/i18n";
 import { Icon } from "../fx/Icon";
 
+const EMPTY_WORKFLOWS: WorkflowRun[] = [];
+
 export function Inspector() {
   const { t } = useI18n();
   const tab = useDesktop((s) => s.inspectorTab);
@@ -176,7 +178,10 @@ function FileTreeNode({ node, onOpen }: { node: FileNode; onOpen(path: string): 
 
 function TasksTab({ session }: { session: Session }) {
   const { t } = useI18n();
-  const workflows = useDesktop((state) => state.workflows[session.id] ?? []);
+  // Zustand selectors must return a stable reference when the store did not
+  // change. Creating `[]` here caused React to treat every read of a history
+  // session as a new snapshot and recurse until the update-depth limit.
+  const workflows = useDesktop((state) => state.workflows[session.id] ?? EMPTY_WORKFLOWS);
   const sendPrompt = useDesktop((state) => state.sendPrompt);
   const plans = session.blocks.filter((b) => b.type === "plan");
   const latest = plans[plans.length - 1];
