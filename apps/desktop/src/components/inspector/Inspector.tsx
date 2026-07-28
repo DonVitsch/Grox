@@ -245,6 +245,12 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
           <span className={`font-mono text-[8.5px] tracking-[0.08em] ${statusTone}`}>{workflow.status.toUpperCase()}</span>
         </div>
         {workflow.objective && <p className="mt-1.5 line-clamp-3 text-[10.5px] leading-relaxed text-mute">{workflow.objective}</p>}
+        <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[8px] text-faint">
+          <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">{workflow.foreground ? "FOREGROUND" : "BACKGROUND"}</span>
+          {workflow.currentPhase && <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">{workflow.currentPhase}</span>}
+          <span className="max-w-[180px] truncate rounded-[3px] border border-line2 px-1.5 py-0.5" title={workflow.runId}>RUN · {workflow.runId}</span>
+          <span className="rounded-[3px] border border-line2 px-1.5 py-0.5">REV {workflow.revision}</span>
+        </div>
       </div>
 
       {workflow.phases.length > 0 && (
@@ -261,7 +267,9 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
       <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-3 py-2 font-mono text-[8.5px] text-dim">
         <span>{zh ? "活跃代理" : "ACTIVE AGENTS"}</span><span className="text-right text-fg2">{workflow.activeAgents}</span>
         <span>{zh ? "已用代理" : "AGENTS USED"}</span><span className="text-right text-fg2">{workflow.agentsUsed}{workflow.agentBudget !== undefined ? ` / ${workflow.agentBudget}` : ""}</span>
+        <span>{zh ? "剩余 / 保留" : "REMAINING / HELD"}</span><span className="text-right text-fg2">{workflow.agentsRemaining ?? "—"} / {workflow.agentsReserved}</span>
         <span>{zh ? "耗时" : "ELAPSED"}</span><span className="text-right text-fg2">{fmtDuration(workflow.elapsedMs)}</span>
+        {workflow.agentUsageIncomplete && <><span className="text-gold">{zh ? "用量状态" : "USAGE"}</span><span className="text-right text-gold">{zh ? "仍在汇总" : "PARTIAL"}</span></>}
       </div>
 
       {workflow.agents.length > 0 && (
@@ -272,7 +280,7 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
               <div key={agent.agentId} className="grid grid-cols-[7px_minmax(0,1fr)_auto] items-center gap-2 rounded-[3px] bg-high/45 px-2 py-1.5">
                 <span className={`h-1.5 w-1.5 rounded-full ${agent.state === "running" ? "animate-pulse-dot bg-acc" : agent.state === "complete" || agent.state === "done" ? "bg-green" : agent.state === "failed" ? "bg-red" : "bg-faint"}`} />
                 <div className="min-w-0"><p className="truncate font-mono text-[9px] text-fg2">{agent.label}</p><p className="truncate text-[8.5px] text-dim">{[agent.phase, agent.model].filter(Boolean).join(" · ") || agent.state}</p></div>
-                <span className="font-mono text-[8px] text-faint">{agent.tokensUsed !== undefined ? `${agent.tokensUsed.toLocaleString()} tok` : ""}</span>
+                <span className="text-right font-mono text-[8px] leading-relaxed text-faint">{agent.tokensUsed !== undefined ? `${fmtTokens(agent.tokensUsed)} tok` : ""}{agent.durationMs !== undefined ? <><br />{fmtDuration(agent.durationMs)}</> : null}</span>
               </div>
             ))}
           </div>
@@ -298,7 +306,7 @@ function WorkflowCard({ workflow, onAction }: { workflow: WorkflowRun; onAction(
         <div className="border-t border-line px-3 py-2 text-[9.5px] leading-relaxed text-mute">
           {workflow.currentAgentLabel && <p>{zh ? "正在运行：" : "Running: "}{workflow.currentAgentLabel}</p>}
           {workflow.pauseMessage && <p className="mt-1 text-gold">{workflow.pauseMessage}</p>}
-          {workflow.resultSummary && <p className="mt-1 whitespace-pre-wrap text-fg2">{workflow.resultSummary}</p>}
+          {workflow.resultSummary && <div className="mt-2 rounded-[3px] border border-line2 bg-high/45 p-2"><p className="mb-1 font-mono text-[8.5px] tracking-[0.1em] text-acc">{zh ? "研究结果摘要" : "RESEARCH SUMMARY"}</p><p className="whitespace-pre-wrap break-words text-fg2">{workflow.resultSummary}</p></div>}
         </div>
       )}
 

@@ -213,10 +213,13 @@ interface DesktopState {
 
 const uid = () => crypto.randomUUID();
 const SESSION_COMPOSERS_KEY = "grox.sessionComposers.v1";
+const WORKFLOW_RUNS_KEY = "grox.workflowRuns.v1";
 let catalogPersistTimer: number | undefined;
 let pendingCatalog: SessionMeta[] | undefined;
 let composerPersistTimer: number | undefined;
 let pendingComposerStates: Record<string, SessionComposerState> | undefined;
+let workflowPersistTimer: number | undefined;
+let pendingWorkflowRuns: Record<string, WorkflowRun[]> | undefined;
 let historySyncPromise: Promise<void> | undefined;
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -248,6 +251,37 @@ function persistSessionComposers(states: Record<string, SessionComposerState>) {
     localStorage.setItem(SESSION_COMPOSERS_KEY, JSON.stringify(serializable));
     pendingComposerStates = undefined;
     composerPersistTimer = undefined;
+  }, 300);
+}
+
+function loadWorkflowRuns(): Record<string, WorkflowRun[]> {
+  const stored = loadJson<Record<string, WorkflowRun[]>>(WORKFLOW_RUNS_KEY, {});
+  return Object.fromEntries(
+    Object.entries(stored).map(([sessionId, runs]) => [sessionId, (Array.isArray(runs) ? runs : []).map((run) => ({
+      ...run,
+      phases: Array.isArray(run.phases) ? run.phases : [],
+      agents: Array.isArray(run.agents) ? run.agents : [],
+      events: Array.isArray(run.events) ? run.events : [],
+    }))]),
+  );
+}
+
+function persistWorkflowRuns(runs: Record<string, WorkflowRun[]>) {
+  pendingWorkflowRuns = runs;
+  if (workflowPersistTimer !== undefined) return;
+  workflowPersistTimer = window.setTimeout(() => {
+    // Keep a bounded, session-keyed archive. Full workflow event payloads can
+    // be large, so the live in-memory view keeps 64 events while the durable
+    // archive keeps the latest 48 per run and 48 runs per session.
+    const archive = Object.fromEntries(
+      Object.entries(pendingWorkflowRuns ?? {}).map(([sessionId, entries]) => [sessionId, entries.slice(-48).map((entry) => ({
+        ...entry,
+        events: entry.events.slice(-48),
+      }))]),
+    );
+    localStorage.setItem(WORKFLOW_RUNS_KEY, JSON.stringify(archive));
+    pendingWorkflowRuns = undefined;
+    workflowPersistTimer = undefined;
   }, 300);
 }
 
@@ -416,6 +450,7 @@ if (import.meta.hot) {
     if (workspaceWatchTimer !== undefined) window.clearInterval(workspaceWatchTimer);
     if (catalogPersistTimer !== undefined) window.clearTimeout(catalogPersistTimer);
     if (composerPersistTimer !== undefined) window.clearTimeout(composerPersistTimer);
+    if (workflowPersistTimer !== undefined) window.clearTimeout(workflowPersistTimer);
   });
 }
 
@@ -535,6 +570,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
             ? { inspectorOpen: true, inspectorTab: "tasks" as InspectorTab }
             : {}),
         });
+        persistWorkflowRuns({ ...state.workflows, [e.sessionId]: next });
         break;
       }
       case "session_meta": {
@@ -752,7 +788,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
     previewError: null,
     planPreviewOpen: false,
     slashCommands: {},
-    workflows: {},
+    workflows: loadWorkflowRuns(),
 
     model: localStorage.getItem("grok.model") ?? "grok-build",
     models: MODELS,
@@ -1272,18 +1308,22 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
     async deleteSession(id) {
       await bridge.deleteSession(id);
-      const { sessionIndex, sessions, activeId, sessionComposers } = get();
+      const { sessionIndex, sessions, activeId, sessionComposers, workflows } = get();
       const rest = { ...sessions };
       delete rest[id];
       const nextComposers = { ...sessionComposers };
       delete nextComposers[id];
+      const nextWorkflows = { ...workflows };
+      delete nextWorkflows[id];
       persistSessionComposers(nextComposers);
+      persistWorkflowRuns(nextWorkflows);
       const nextIndex = sessionIndex.filter((m) => m.id !== id);
       persistSessionCatalog(nextIndex);
       set({
         sessionIndex: nextIndex,
         sessions: rest,
         sessionComposers: nextComposers,
+        workflows: nextWorkflows,
         ...(activeId === id ? { activeId: null, view: "home" as View } : {}),
       });
     },
@@ -1442,6 +1482,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
             planPreviewOpen: false,
             previewOpen: false,
           });
+          persistWorkflowRuns(nextWorkflows);
         }
       }
       await bridge.loadSession(activeId);
