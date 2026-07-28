@@ -761,6 +761,9 @@ export class AcpBridge implements GrokBridge {
   private replaying = new Map<string, Session>();
   private usage = new Map<string, Usage>();
   private sessionOptions = new Map<string, PromptOptions>();
+  private sessionSetModelUnsupported = false;
+  private activePromptSessions = new Set<string>();
+  private promptDrainWaiters = new Set<() => void>();
   private knownSessions = new Set<string>();
   private lastActivity = new Map<string, number>();
   private unlisten: UnlistenFn[] = [];
@@ -964,6 +967,7 @@ export class AcpBridge implements GrokBridge {
     this.interactions.clear();
     this.cursors.clear();
     this.sessionOptions.clear();
+    this.sessionSetModelUnsupported = false;
     this.knownSessions.clear();
     this.authMethodId = undefined;
     this.modelState = { models: MODELS, currentId: MODELS[0].id };
@@ -973,6 +977,20 @@ export class AcpBridge implements GrokBridge {
     const next = this.initializeAgent();
     this.ready = next;
     await next;
+  }
+
+  private async waitForActivePrompts(): Promise<void> {
+    if (this.activePromptSessions.size === 0) return;
+    await new Promise<void>((resolve) => {
+      this.promptDrainWaiters.add(resolve);
+    });
+  }
+
+  private markPromptFinished(sessionId: string) {
+    this.activePromptSessions.delete(sessionId);
+    if (this.activePromptSessions.size !== 0) return;
+    for (const resolve of this.promptDrainWaiters) resolve();
+    this.promptDrainWaiters.clear();
   }
 
   private async configureAuthentication(responseValue: unknown) {
@@ -1989,6 +2007,10 @@ export class AcpBridge implements GrokBridge {
 
   async configureProvider(config: ProviderConfig): Promise<void> {
     await invoke("configure_provider", { request: config });
+    // Provider settings affect the next ACP child. Let an in-flight turn
+    // complete on the existing child before replacing it, then reload the same
+    // session so conversation continuity is preserved by the caller.
+    await this.waitForActivePrompts();
     await this.restartAgent();
     if (config.kind === "oauth" && this.authState.required) await this.authenticate();
   }
@@ -2011,6 +2033,7 @@ export class AcpBridge implements GrokBridge {
 
   async activateProviderProfile(id: string): Promise<void> {
     await invoke("activate_provider_profile", { id });
+    await this.waitForActivePrompts();
     await this.restartAgent();
   }
 
@@ -2085,13 +2108,18 @@ export class AcpBridge implements GrokBridge {
 
   async newSession(cwd: string): Promise<void> {
     const metaRequest = await this.sessionMeta(cwd);
+    const preferredModel = localStorage.getItem("grok.model")?.trim();
     const computer = await invoke<ComputerSessionExtensions>("computer_session_extensions");
     let responseValue: unknown;
     try {
       responseValue = await this.request(ACP_METHODS.sessionNew, {
         cwd,
         mcpServers: computer.mcpServers,
-        _meta: { ...metaRequest, pluginDirs: computer.pluginDirs },
+        _meta: {
+          ...metaRequest,
+          ...(preferredModel ? { modelId: preferredModel } : {}),
+          pluginDirs: computer.pluginDirs,
+        },
       });
     } catch (error) {
       // Older Grok CLIs reject the v0.2.3 Computer Use session extensions
@@ -2101,7 +2129,10 @@ export class AcpBridge implements GrokBridge {
       responseValue = await this.request(ACP_METHODS.sessionNew, {
         cwd,
         mcpServers: [],
-        _meta: metaRequest,
+        _meta: {
+          ...metaRequest,
+          ...(preferredModel ? { modelId: preferredModel } : {}),
+        },
       });
     }
     const response = record(responseValue);
@@ -2204,6 +2235,7 @@ export class AcpBridge implements GrokBridge {
 
   async prompt(sessionId: string, text: string, options: PromptOptions): Promise<void> {
     await this.ready;
+    this.activePromptSessions.add(sessionId);
     this.knownSessions.add(sessionId);
     const sessionCwd = this.catalogue.get(sessionId)?.cwd;
     if (sessionCwd) this.sessionWorkspaces.set(sessionId, sessionCwd);
@@ -2211,12 +2243,25 @@ export class AcpBridge implements GrokBridge {
     this.emit({ type: "status", sessionId, status: "running" });
     try {
       const previous = this.sessionOptions.get(sessionId);
-      if (!previous || previous.model !== options.model || previous.effort !== options.effort) {
-        await this.requestRaw(ACP_METHODS.sessionSetModel, {
-          sessionId,
-          modelId: options.model,
-          _meta: { reasoningEffort: options.effort },
-        });
+      if (
+        !this.sessionSetModelUnsupported
+        && (!previous || previous.model !== options.model)
+      ) {
+        try {
+          await this.requestRaw(ACP_METHODS.sessionSetModel, {
+            sessionId,
+            modelId: options.model,
+          });
+        } catch (error) {
+          if (!isInvalidParamsError(error)) throw error;
+          // Older Grok CLI builds and some compatible-provider adapters expose
+          // model metadata but reject ACP session/set_model. The provider's
+          // resident model is already selected at process startup, so continue
+          // the prompt instead of turning a harmless capability mismatch into
+          // a failed first message. Remember this for the lifetime of the child
+          // process to avoid repeating the same rejected RPC every turn.
+          this.sessionSetModelUnsupported = true;
+        }
       }
       if (!previous || previous.mode !== options.mode) {
         await this.requestRaw(ACP_METHODS.sessionSetMode, {
@@ -2268,6 +2313,7 @@ export class AcpBridge implements GrokBridge {
       this.emit({ type: "error", sessionId, message: errorText(error) });
     } finally {
       this.finishTurn(sessionId);
+      this.markPromptFinished(sessionId);
     }
   }
 

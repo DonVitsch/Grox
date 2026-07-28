@@ -1019,23 +1019,32 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
     async configureProvider(config) {
       const wasComplete = localStorage.getItem("grox.accountSetupComplete") === "1";
+      const activeId = get().activeId;
       localStorage.setItem("grox.accountSetupComplete", "1");
       set({ accountSetupOpen: false });
       try {
-        if (Object.values(get().sessions).some((session) => session.status !== "idle")) {
-          throw new Error("请先终止正在执行的任务，再切换模型服务");
-        }
-        const activeId = get().activeId;
         set({ providerSwitching: true });
         await bridge.configureProvider(config);
-        await get().refreshProviderProfiles();
-        await Promise.all([get().refreshAccount(), get().refreshModels()]);
-        if (activeId) await bridge.loadSession(activeId);
-        set({ providerSwitching: false, startupError: null });
       } catch (error) {
         if (!wasComplete) localStorage.removeItem("grox.accountSetupComplete");
         set({ accountSetupOpen: !wasComplete, providerSwitching: false });
         throw error;
+      }
+      try {
+        if (activeId) await bridge.loadSession(activeId);
+        set({ providerSwitching: false, startupError: null });
+      } catch (error) {
+        set({
+          providerSwitching: false,
+          startupError: `模型服务已切换，但当前会话恢复失败：${error instanceof Error ? error.message : String(error)}`,
+        });
+        throw error;
+      }
+      try {
+        await get().refreshProviderProfiles();
+        await Promise.all([get().refreshAccount(), get().refreshModels()]);
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
       }
     },
 
@@ -1069,22 +1078,33 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     async activateProviderProfile(id) {
-      if (Object.values(get().sessions).some((session) => session.status !== "idle")) {
-        throw new Error("请先终止正在执行的任务，再切换模型服务");
-      }
       const previousId = get().activeProviderProfileId;
+      const activeId = get().activeId;
       set({ providerSwitching: true });
       // Reflect the user's choice immediately. ACP restart and model refresh
       // can take several seconds, but the selector should never feel stuck.
       set({ activeProviderProfileId: id });
       try {
         await bridge.activateProviderProfile(id);
-        await get().refreshProviderProfiles();
-        await Promise.all([get().refreshAccount(), get().refreshModels()]);
-        set({ providerSwitching: false, startupError: null });
       } catch (error) {
         set({ activeProviderProfileId: previousId, providerSwitching: false });
         throw error;
+      }
+      try {
+        if (activeId) await bridge.loadSession(activeId);
+        set({ providerSwitching: false, startupError: null });
+      } catch (error) {
+        set({
+          providerSwitching: false,
+          startupError: `供应商已切换，但当前会话恢复失败：${error instanceof Error ? error.message : String(error)}`,
+        });
+        throw error;
+      }
+      try {
+        await get().refreshProviderProfiles();
+        await Promise.all([get().refreshAccount(), get().refreshModels()]);
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
       }
     },
 
