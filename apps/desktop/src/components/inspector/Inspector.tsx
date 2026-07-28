@@ -84,9 +84,7 @@ function FilesTab({ session }: { session?: Session }) {
   const workspaceFiles = useDesktop((state) => state.workspaceFiles);
   const workspaceDiffs = useDesktop((state) => state.workspaceDiffs);
   const workspaceDiffReady = useDesktop((state) => state.workspaceDiffReady);
-  const refreshWorkspaceDiffs = useDesktop((state) => state.refreshWorkspaceDiffs);
   const openPreview = useDesktop((state) => state.openPreview);
-  const [view, setView] = useState<"diff" | "files">("diff");
   const toolHunks: DiffHunk[] = (session?.blocks ?? []).flatMap((b) =>
     b.type === "tool" && b.call.diff ? b.call.diff : [],
   );
@@ -97,34 +95,20 @@ function FilesTab({ session }: { session?: Session }) {
   const del = hunks.reduce((n, h) => n + h.removed, 0);
   return (
     <div>
-      <div className="mb-3 flex items-center gap-1 border-b border-line px-1 pb-2">
-        <button onClick={() => setView("diff")} className={`rounded-[3px] px-2 py-1 font-mono text-[9px] ${view === "diff" ? "bg-high text-fg" : "text-dim hover:text-fg"}`}>
-          {zh ? "变更" : "CHANGES"}{hunks.length > 0 ? ` · ${hunks.length}` : ""}
-        </button>
-        <button onClick={() => setView("files")} className={`rounded-[3px] px-2 py-1 font-mono text-[9px] ${view === "files" ? "bg-high text-fg" : "text-dim hover:text-fg"}`}>
-          {zh ? "文件" : "FILES"}
-        </button>
-        <button onClick={() => void refreshWorkspaceDiffs()} className="ml-auto flex h-6 w-6 items-center justify-center text-dim hover:text-fg" title={zh ? "刷新工作区差异" : "Refresh working-tree diff"}>
-          <Icon name="refresh" size={10} />
-        </button>
+      {hunks.length > 0 ? <>
+        <div className="mb-2 flex items-center gap-2 px-1">
+          <span className="lbl !text-[9.5px]">{workspaceDiffReady ? (zh ? "工作区差异" : "WORKING TREE DIFF") : (zh ? "会话差异" : "SESSION DIFF")}</span>
+          <span className="tnum text-[9.5px] text-diff-add-fg">+{add}</span>
+          <span className="tnum text-[9.5px] text-diff-del-fg">−{del}</span>
+        </div>
+        <DiffView diff={hunks} />
+      </> : <div className="mb-3 rounded-[4px] border border-line bg-raise px-3 py-3 text-[10px] leading-relaxed text-dim">
+        {zh ? "当前工作区没有可显示的未提交差异。" : "No uncommitted working-tree diff is available."}
+      </div>}
+      <div className="mb-2 mt-4 px-1"><span className="lbl !text-[9.5px]">{t("projectResources")}</span></div>
+      <div className="space-y-px">
+        {tree.map((node) => <FileTreeNode key={node.path} node={node} onOpen={(path) => void openPreview(path)} />)}
       </div>
-      {view === "diff" ? (
-        hunks.length > 0 ? <>
-          <div className="mb-2 flex items-center gap-2 px-1">
-            <span className="lbl !text-[9.5px]">{workspaceDiffReady ? (zh ? "工作区差异" : "WORKING TREE DIFF") : (zh ? "会话差异" : "SESSION DIFF")}</span>
-            <span className="tnum text-[9.5px] text-diff-add-fg">+{add}</span>
-            <span className="tnum text-[9.5px] text-diff-del-fg">−{del}</span>
-          </div>
-          <DiffView diff={hunks} />
-        </> : <div className="rounded-[4px] border border-line bg-raise px-3 py-5 text-center text-[10px] leading-relaxed text-dim">
-          {zh ? "当前工作区没有可显示的未提交差异。提交过的改动仍可在会话工具记录中查看。" : "No uncommitted working-tree diff is available. Committed changes remain in the session tool record."}
-        </div>
-      ) : <>
-        <div className="mb-2 px-1"><span className="lbl !text-[9.5px]">{t("projectResources")}</span></div>
-        <div className="space-y-px">
-          {tree.map((node) => <FileTreeNode key={node.path} node={node} onOpen={(path) => void openPreview(path)} />)}
-        </div>
-      </>}
     </div>
   );
 }
