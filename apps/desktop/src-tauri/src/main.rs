@@ -2233,7 +2233,6 @@ Use only the grok_desktop_computer MCP tools for an explicit `/computer` or `@Co
 
 #[tauri::command]
 fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
-    let plugin = ensure_computer_plugin()?;
     let mut lease_bytes = [0_u8; 16];
     getrandom::fill(&mut lease_bytes)
         .map_err(|error| format!("无法创建 Computer Use 租约：{error}"))?;
@@ -2242,6 +2241,17 @@ fn computer_session_extensions() -> Result<ComputerSessionExtensions, String> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     computer_mcp::clear_emergency_stop(&lease_id)?;
+    // The foreground harness is intentionally Windows-only.  Do not advertise
+    // an HTTP MCP server on macOS/Linux: the CLI would repeatedly attempt a
+    // handshake and surface a misleading "MCP transport error" to users.
+    if !cfg!(target_os = "windows") {
+        return Ok(ComputerSessionExtensions {
+            mcp_servers: Vec::new(),
+            plugin_dirs: Vec::new(),
+            lease_id,
+        });
+    }
+    let plugin = ensure_computer_plugin()?;
     let endpoint = computer_mcp::serve_http(lease_id.clone())?;
     Ok(ComputerSessionExtensions {
         mcp_servers: vec![serde_json::json!({
@@ -2546,14 +2556,19 @@ async fn acp_spawn(
     }
 
     let runtime = configured_grok_command(&app);
-    let computer_plugin = ensure_computer_plugin()
-        .map_err(|error| format!("Computer Use Plugin 初始化失败：{error}"))?;
+    let computer_plugin = if cfg!(target_os = "windows") {
+        Some(ensure_computer_plugin()
+            .map_err(|error| format!("Computer Use Plugin 初始化失败：{error}"))?)
+    } else {
+        None
+    };
     let command_path = PathBuf::from(&runtime.path);
     let mut command = Command::new(&command_path);
+    command.arg("agent");
+    if let Some(plugin) = computer_plugin.as_ref() {
+        command.arg("--plugin-dir").arg(plugin);
+    }
     command
-        .arg("agent")
-        .arg("--plugin-dir")
-        .arg(&computer_plugin)
         .arg("stdio")
         .current_dir(&cwd)
         .stdin(Stdio::piped())

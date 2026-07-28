@@ -1072,16 +1072,18 @@ export const useDesktop = create<DesktopState>((set, get) => {
       if (Object.values(get().sessions).some((session) => session.status !== "idle")) {
         throw new Error("请先终止正在执行的任务，再切换模型服务");
       }
-      const activeId = get().activeId;
+      const previousId = get().activeProviderProfileId;
       set({ providerSwitching: true });
+      // Reflect the user's choice immediately. ACP restart and model refresh
+      // can take several seconds, but the selector should never feel stuck.
+      set({ activeProviderProfileId: id });
       try {
         await bridge.activateProviderProfile(id);
         await get().refreshProviderProfiles();
         await Promise.all([get().refreshAccount(), get().refreshModels()]);
-        if (activeId) await bridge.loadSession(activeId);
         set({ providerSwitching: false, startupError: null });
       } catch (error) {
-        set({ providerSwitching: false });
+        set({ activeProviderProfileId: previousId, providerSwitching: false });
         throw error;
       }
     },
@@ -1262,7 +1264,8 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     sendPrompt(text, attachments = []) {
-      const { activeId, sessions, model, effort, mode, permissionMode, sessionComposers } = get();
+      const { activeId, sessions, model, effort, mode, permissionMode, sessionComposers, providerSwitching } = get();
+      if (providerSwitching) return;
       const session = activeId ? sessions[activeId] : null;
       if (!session || session.status !== "idle") return;
       const composer = sessionComposers[session.id] ?? {
