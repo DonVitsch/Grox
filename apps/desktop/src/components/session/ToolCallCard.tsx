@@ -66,6 +66,9 @@ export function ToolCallCard({ block }: { block: ToolBlock }) {
   const title = language === "zh-CN"
     ? ({ "Web search:": "网页搜索", "X search:": "X 搜索", "Model search:": "模型搜索" } as Record<string, string>)[call.title] ?? call.title
     : call.title;
+  const failure = call.status === "error" && call.output
+    ? toolFailureSummary(call.output, language)
+    : undefined;
 
   return (
     <div className="mb-1 animate-fade-up pl-0.5">
@@ -77,6 +80,11 @@ export function ToolCallCard({ block }: { block: ToolBlock }) {
           {call.detail && (
             <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-mute">
               {call.detail}
+            </span>
+          )}
+          {failure && (
+            <span title={failure} className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-red/80">
+              {failure}
             </span>
           )}
           <StatusChip call={call} language={language} />
@@ -116,6 +124,18 @@ export function ToolCallCard({ block }: { block: ToolBlock }) {
       </div>
     </div>
   );
+}
+
+function toolFailureSummary(output: string, language: "zh-CN" | "en-US") {
+  // The upstream web sandbox rejects targets that resolve to private/internal
+  // addresses (including some DNS-filtered public domains). Showing that
+  // reason directly avoids making an OAuth or provider issue look like a
+  // mysterious generic tool failure, while deliberately not weakening SSRF
+  // protection in the desktop host.
+  if (/ssrf\s+blocked|private\/internal\s+ip/i.test(output)) {
+    return language === "zh-CN" ? "目标地址被安全策略拦截" : "blocked by network safety policy";
+  }
+  return output.replace(/\s+/g, " ").trim().slice(0, 180);
 }
 
 function StatusChip({ call, language }: { call: ToolCall; language: "zh-CN" | "en-US" }) {

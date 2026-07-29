@@ -678,25 +678,34 @@ html[data-reduce-motion="1"] .plan-spinner {
       transparent
     );
   }
-  .md table {
+  .md-table-wrap {
     width: 100%;
     margin: 1em 0 1.2em;
+    overflow-x: auto;
+    border: 1px solid var(--color-line2);
+    border-radius: 6px;
+    background: var(--color-raise);
+  }
+  .md-table-wrap table {
+    width: 100%;
+    min-width: max-content;
+    margin: 0;
     border-collapse: collapse;
     font-size: 0.93em;
   }
-  .md th,
-  .md td {
-    padding: 7px 12px 7px 0;
+  .md-table-wrap th,
+  .md-table-wrap td {
+    padding: 8px 12px;
     border-bottom: 1px solid var(--color-line);
     text-align: left;
     vertical-align: top;
   }
-  .md th:last-child,
-  .md td:last-child {
-    padding-right: 0;
+  .md-table-wrap tbody tr:last-child td {
+    border-bottom: 0;
   }
-  .md thead th {
+  .md-table-wrap thead th {
     border-bottom: 1px solid var(--color-line2);
+    background: var(--color-high);
     color: var(--color-fg);
     font-weight: 620;
     white-space: nowrap;

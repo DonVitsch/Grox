@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useDesktop, type ProjectMeta } from "../../state/store";
 import { usePreferences } from "../../state/preferences";
 import { useI18n } from "../../lib/i18n";
-import { fmtRelTime, fmtTokens } from "../../lib/format";
+import { fmtBillingDate, fmtRelTime, fmtTokens } from "../../lib/format";
 import { Wordmark } from "../fx/Wordmark";
 import { Icon } from "../fx/Icon";
 import type { Session, SessionMeta } from "../../bridge/types";
@@ -179,10 +179,15 @@ export function Sidebar() {
               </p>
             </div>
             <div className="grid grid-cols-2 gap-1 border-b border-line py-2">
-              <Limit label={t("fiveHour")} value={t("unavailable")} />
               <Limit
-                label={t("weekly")}
-                value={billing?.creditUsagePercent !== undefined ? `${Math.round(billing.creditUsagePercent)}%` : t("unavailable")}
+                label={language === "zh-CN" ? "周期结束" : "Period ends"}
+                value={fmtBillingDate(billing?.periodEnd, language)}
+              />
+              <Limit
+                label={language === "zh-CN" ? "订阅额度" : "Plan quota"}
+                value={billing?.creditUsagePercent !== undefined
+                  ? `${Math.round(billing.creditUsagePercent)}%`
+                  : (language === "zh-CN" ? "上游未公开" : "Not exposed")}
               />
             </div>
             <MenuButton icon="gear" label={t("settings")} onClick={() => { setSettingsOpen(true); setAccountOpen(false); }} />

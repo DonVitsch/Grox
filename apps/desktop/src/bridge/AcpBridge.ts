@@ -69,6 +69,10 @@ export const ACP_METHODS = {
 
 /** No session-scoped traffic for this long during a turn = wedged upstream. */
 const PROMPT_STALL_MS = 5 * 60_000;
+// Grox hosts the official `grok agent stdio` process. Keep ACP metadata
+// aligned with a terminal `grok` invocation so subscription eligibility is
+// evaluated as Grok Build CLI rather than as an unreleased desktop client.
+const UPSTREAM_CLI_CLIENT_IDENTIFIER = "grok-shell";
 
 type JsonObject = Record<string, unknown>;
 type RpcId = string | number;
@@ -239,6 +243,21 @@ function string(value: unknown): string | undefined {
 
 function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Grok Build billing serializes monetary values as `{ val: number }`. */
+function billingNumber(value: unknown): number | undefined {
+  const nested = record(value);
+  return number(value) ?? number(nested?.val) ?? number(nested?.value) ?? number(nested?.amount);
+}
+
+function billingPeriodType(value: unknown): string | undefined {
+  const raw = string(value);
+  if (!raw) return undefined;
+  return raw
+    .replace(/^USAGE_PERIOD_TYPE_/i, "")
+    .replace(/_/g, " ")
+    .toLocaleLowerCase();
 }
 
 function bool(value: unknown): boolean | undefined {
@@ -1026,7 +1045,12 @@ export class AcpBridge implements GrokBridge {
 
   private queueStreamAppend(event: Extract<BridgeEvent, { type: "assistant_append" | "thinking_append" }>) {
     const key = `${event.type}:${event.sessionId}:${event.blockId}`;
-    const delta = event.delta.replace(/(.{1,16})\1{5,}/gu, "$1$1…");
+    // Guard against pathological model loops without touching Markdown syntax.
+    // In particular, GFM table divider rows are long runs of `-`; collapsing
+    // those dashes makes the otherwise valid table become one plain paragraph.
+    const delta = event.delta.replace(/(.{1,16})\1{5,}/gu, (match, unit: string) => (
+      /[|`~*_#[\]():-]/u.test(unit) ? match : `${unit}${unit}…`
+    ));
     if (!delta) return;
     const previous = this.repeatedDeltas.get(key);
     if (previous?.value === delta && delta.trim().length <= 24) {
@@ -1127,13 +1151,13 @@ export class AcpBridge implements GrokBridge {
         terminal: false,
       },
       clientInfo: {
-        name: "grox-desktop",
-        title: "Grox Desktop",
+        name: UPSTREAM_CLI_CLIENT_IDENTIFIER,
+        title: "Grok Build CLI",
         version: clientVersion ?? (await getVersion().catch(() => "0.2.0")),
       },
       _meta: {
-        clientIdentifier: "grok-desktop",
-        clientType: "desktop",
+        clientIdentifier: UPSTREAM_CLI_CLIENT_IDENTIFIER,
+        clientType: "shell",
         ...(clientVersion ? { clientVersion } : {}),
       },
     }, 15_000);
@@ -2178,7 +2202,7 @@ export class AcpBridge implements GrokBridge {
     this.permissionMode = mode;
     localStorage.setItem("grok.permissionMode", mode);
     void this.notify("x.ai/yolo_mode_changed", {
-      clientIdentifier: "grok-desktop",
+      clientIdentifier: UPSTREAM_CLI_CLIENT_IDENTIFIER,
       permission_mode:
         mode === "bypass" ? "always-approve" : mode === "auto" ? "auto" : "default",
       yolo_mode: mode === "bypass",
@@ -2192,7 +2216,7 @@ export class AcpBridge implements GrokBridge {
 
   private sessionPermissionMeta() {
     return {
-      clientIdentifier: "grok-desktop",
+      clientIdentifier: UPSTREAM_CLI_CLIENT_IDENTIFIER,
       yoloMode: this.permissionMode === "bypass",
       autoMode: this.permissionMode === "auto",
     };
@@ -2216,6 +2240,14 @@ export class AcpBridge implements GrokBridge {
 
   async authenticate(): Promise<void> {
     await this.ready;
+    // A click on "Sign in to Grok" is an explicit choice of the subscription
+    // path. Make that choice durable before opening the browser, otherwise a
+    // previously selected API gateway can keep owning the next ACP child.
+    const provider = await this.getProviderStatus();
+    if (provider.kind !== "oauth") {
+      await invoke("configure_provider", { request: { kind: "oauth" } });
+      await this.restartAgent();
+    }
     if (!this.authMethodId) throw new Error("Grok Agent 没有可用的交互认证方式");
     if (this.authState.inProgress) return;
     this.setAuthState({ required: true, inProgress: true, error: undefined });
@@ -2288,14 +2320,15 @@ export class AcpBridge implements GrokBridge {
     const period = record(config.currentPeriod) ?? record(config.current_period) ?? {};
     return {
       subscriptionTier: string(raw.subscriptionTier) ?? string(raw.subscription_tier),
-      creditUsagePercent: number(config.creditUsagePercent) ?? number(config.credit_usage_percent),
-      periodType: string(period.type),
+      creditUsagePercent:
+        billingNumber(config.creditUsagePercent) ?? billingNumber(config.credit_usage_percent),
+      periodType: billingPeriodType(period.type),
       periodStart: string(period.start),
       periodEnd: string(period.end),
-      onDemandEnabled: Boolean(raw.onDemandEnabled ?? raw.on_demand_enabled),
-      onDemandCap: number(config.onDemandCap) ?? number(config.on_demand_cap),
-      onDemandUsed: number(config.onDemandUsed) ?? number(config.on_demand_used),
-      prepaidBalance: number(config.prepaidBalance) ?? number(config.prepaid_balance),
+      onDemandEnabled: bool(raw.onDemandEnabled ?? raw.on_demand_enabled),
+      onDemandCap: billingNumber(config.onDemandCap) ?? billingNumber(config.on_demand_cap),
+      onDemandUsed: billingNumber(config.onDemandUsed) ?? billingNumber(config.on_demand_used),
+      prepaidBalance: billingNumber(config.prepaidBalance) ?? billingNumber(config.prepaid_balance),
     };
   }
 

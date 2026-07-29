@@ -35,6 +35,18 @@ export function fmtClock(ts: number): string {
   return new Date(ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+export function fmtBillingDate(value: string | undefined, locale?: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+export function fmtBillingValue(value: number | undefined): string {
+  if (value === undefined) return "—";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
 export function shortPath(p: string): string {
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
   if (parts.length <= 2) return p;

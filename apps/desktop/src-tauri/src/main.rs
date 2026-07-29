@@ -25,6 +25,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
+use toml_edit::{value as toml_value, Document, Item, Table, TableLike};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -42,22 +43,19 @@ const GROK_INSTALL_SH_URL: &str = "https://x.ai/cli/install.sh";
 // user-scoped compatibility workflow so every research run reaches Verify and
 // Report, including a useful audit/report for partial evidence.
 const GROX_DEEP_RESEARCH_WORKFLOW: &str = include_str!("../resources/grox-deep-research.rhai");
-const GROX_PRIVACY_ENV: [(&str, &str); 13] = [
-    ("GROX_PRIVACY_MODE", "1"),
-    // Legacy fallbacks also protect users who point GROK_DESKTOP_CLI at an
-    // older Grok binary that does not yet understand GROX_PRIVACY_MODE.
-    ("DISABLE_TELEMETRY", "1"),
-    ("DISABLE_ERROR_REPORTING", "1"),
-    ("GROK_TELEMETRY_ENABLED", "0"),
-    ("GROK_TELEMETRY_TRACE_UPLOAD", "0"),
-    ("GROK_TELEMETRY_MIXPANEL_ENABLED", "0"),
-    ("GROK_FEEDBACK_ENABLED", "0"),
-    ("GROK_ERROR_REPORTING", "0"),
-    ("GROK_EXTERNAL_OTEL", "0"),
-    ("OTEL_TRACES_EXPORTER", "none"),
-    ("OTEL_METRICS_EXPORTER", "none"),
-    ("OTEL_LOGS_EXPORTER", "none"),
-    ("GROK_CLIPBOARD_NO_OSC52", "1"),
+// Grok Build decides OAuth eligibility from the official CLI client mode.
+// Grox is an ACP host around that CLI, not a separate xAI desktop client, so
+// preserve the identity used by `grok` in a terminal. In particular, never
+// advertise the unreleased `grok-desktop` client mode to the upstream service.
+const UPSTREAM_CLI_CLIENT_NAME: &str = "grok-shell";
+const GROX_MANAGED_PROVIDER_START: &str = "# >>> Grox managed provider";
+const GROX_MANAGED_PROVIDER_END: &str = "# <<< Grox managed provider";
+const GROX_PROVIDER_AUTH_OVERRIDES_FILE: &str = "grox-provider-auth-overrides.json";
+const PROVIDER_ENV_KEYS: [&str; 4] = [
+    "XAI_API_KEY",
+    "GROK_MODELS_BASE_URL",
+    "GROK_MODELS_LIST_URL",
+    "GROK_MODELS_API_BACKEND",
 ];
 
 struct AgentProcess {
@@ -342,6 +340,26 @@ struct ProviderProfilesFile {
     profiles: Vec<StoredProviderProfile>,
 }
 
+/// Grox only changes `env_key` for an active compatible provider.  Keep the
+/// exact prior TOML item so switching back to OAuth or the official API key
+/// restores the user's own model configuration rather than leaving a stale
+/// gateway credential rule behind.
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderAuthOverridesFile {
+    #[serde(default)]
+    models: BTreeMap<String, ProviderModelAuthBackup>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderModelAuthBackup {
+    model_existed: bool,
+    /// The original TOML representation (for example `"OPENAI_API_KEY"` or
+    /// `["FIRST", "SECOND"]`). It is a variable name, never a secret.
+    env_key: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderProfileSummary {
@@ -517,12 +535,10 @@ fn restrict_private_file(_path: &Path) -> Result<(), String> {
 }
 
 fn replace_managed_env_block(content: &str, replacement: &str) -> String {
-    const START: &str = "# >>> Grox managed provider";
-    const END: &str = "# <<< Grox managed provider";
-    let preserved = if let Some(start) = content.find(START) {
+    let preserved = if let Some(start) = content.find(GROX_MANAGED_PROVIDER_START) {
         let suffix = &content[start..];
-        if let Some(relative_end) = suffix.find(END) {
-            let after = start + relative_end + END.len();
+        if let Some(relative_end) = suffix.find(GROX_MANAGED_PROVIDER_END) {
+            let after = start + relative_end + GROX_MANAGED_PROVIDER_END.len();
             format!(
                 "{}{}",
                 content[..start].trim_end(),
@@ -546,7 +562,7 @@ fn replace_managed_env_block(content: &str, replacement: &str) -> String {
     } else {
         format!("{preserved}\n\n")
     };
-    format!("{prefix}{START}\n{replacement}\n{END}\n")
+    format!("{prefix}{GROX_MANAGED_PROVIDER_START}\n{replacement}\n{GROX_MANAGED_PROVIDER_END}\n")
 }
 
 fn env_value(value: &str) -> String {
@@ -563,10 +579,7 @@ fn config_path(id: &str, cwd: &Path) -> Result<(PathBuf, &'static str, &'static 
     }
 }
 
-fn parse_env_file(path: &Path) -> BTreeMap<String, String> {
-    let Ok(content) = read_bounded_text(path, MAX_CONFIG_BYTES) else {
-        return BTreeMap::new();
-    };
+fn parse_env_text(content: &str) -> BTreeMap<String, String> {
     content
         .lines()
         .filter_map(|line| {
@@ -595,6 +608,42 @@ fn parse_env_file(path: &Path) -> BTreeMap<String, String> {
             Some((key.to_string(), value.to_string()))
         })
         .collect()
+}
+
+/// Only variables explicitly written between Grox's markers belong to the
+/// desktop app. `~/.grok/.env` is not an official Grok Build config file, so
+/// inheriting arbitrary entries from it makes an OAuth CLI run behave like a
+/// stale third-party provider configuration.
+fn parse_grox_managed_provider_env(path: &Path) -> BTreeMap<String, String> {
+    let Ok(content) = read_bounded_text(path, MAX_CONFIG_BYTES) else {
+        return BTreeMap::new();
+    };
+    let Some((_, after_start)) = content.split_once(GROX_MANAGED_PROVIDER_START) else {
+        return BTreeMap::new();
+    };
+    let Some((block, _)) = after_start.split_once(GROX_MANAGED_PROVIDER_END) else {
+        return BTreeMap::new();
+    };
+    parse_env_text(block)
+}
+
+/// Start every CLI child from a clean provider environment, then add only the
+/// provider explicitly selected in Grox. This prevents an OAuth login from
+/// inheriting API gateway variables from the desktop app, a parent shell, or
+/// unmarked lines in `~/.grok/.env`.
+fn apply_grox_provider_environment(command: &mut Command) {
+    for key in PROVIDER_ENV_KEYS {
+        command.env_remove(key);
+    }
+    let Ok(home) = grok_home() else {
+        return;
+    };
+    let values = parse_grox_managed_provider_env(&home.join(".env"));
+    for key in PROVIDER_ENV_KEYS {
+        if let Some(value) = values.get(key) {
+            command.env(key, value);
+        }
+    }
 }
 
 fn checked_workspace_file(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
@@ -1885,6 +1934,201 @@ fn write_provider_profiles_file(value: &ProviderProfilesFile) -> Result<(), Stri
     restrict_private_file(&path)
 }
 
+fn provider_auth_overrides_path() -> Result<PathBuf, String> {
+    Ok(grok_home()?.join(GROX_PROVIDER_AUTH_OVERRIDES_FILE))
+}
+
+fn read_provider_auth_overrides() -> Result<ProviderAuthOverridesFile, String> {
+    let path = provider_auth_overrides_path()?;
+    if !path.exists() {
+        return Ok(ProviderAuthOverridesFile::default());
+    }
+    let content = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "无法读取 Grox 兼容服务认证还原信息 {}：{error}",
+            path.display()
+        )
+    })
+}
+
+fn write_provider_auth_overrides(value: &ProviderAuthOverridesFile) -> Result<(), String> {
+    let path = provider_auth_overrides_path()?;
+    if value.models.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("无法移除 Grox 兼容服务认证还原信息：{error}"))?;
+        }
+        return Ok(());
+    }
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("无法序列化 Grox 兼容服务认证还原信息：{error}"))?;
+    atomic_write(&path, &content)?;
+    restrict_private_file(&path)
+}
+
+fn parse_grok_config_document(content: &str) -> Result<Document, String> {
+    content.parse::<Document>().map_err(|error| {
+        format!(
+            "Grok config.toml 格式无效，无法安全切换兼容服务认证：{error}。请先修复该文件后重试。"
+        )
+    })
+}
+
+fn config_value_item(raw: &str) -> Result<Item, String> {
+    let document = format!("value = {raw}\n")
+        .parse::<Document>()
+        .map_err(|error| format!("无法还原原有模型认证配置：{error}"))?;
+    document
+        .get("value")
+        .cloned()
+        .ok_or_else(|| "无法还原原有模型认证配置".to_string())
+}
+
+fn model_table_mut<'a>(document: &'a mut Document, model_id: &str) -> Result<(&'a mut dyn TableLike, bool), String> {
+    let root = document.as_table_mut();
+    if !root.contains_key("model") {
+        root.insert("model", Item::Table(Table::new()));
+    }
+    let models = root
+        .get_mut("model")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| "Grok config.toml 中的 [model] 不是 TOML 表，无法安全写入兼容服务认证".to_string())?;
+    let existed = models.contains_key(model_id);
+    if !existed {
+        models.insert(model_id, Item::Table(Table::new()));
+    }
+    let model = models
+        .get_mut(model_id)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| format!("模型 {model_id} 的配置不是 TOML 表，无法安全写入兼容服务认证"))?;
+    Ok((model, existed))
+}
+
+fn restore_grox_provider_auth_overrides() -> Result<(), String> {
+    let overrides = read_provider_auth_overrides()?;
+    if overrides.models.is_empty() {
+        return Ok(());
+    }
+    let home = grok_home()?;
+    let path = home.join("config.toml");
+    let content = if path.exists() {
+        read_bounded_text(&path, MAX_CONFIG_BYTES)?
+    } else {
+        String::new()
+    };
+    let mut document = parse_grok_config_document(&content)?;
+    let root = document.as_table_mut();
+    let Some(models) = root.get_mut("model").and_then(Item::as_table_like_mut) else {
+        // A user might have deleted the whole table while Grox was closed;
+        // that already removes every override, so do not recreate it.
+        write_provider_auth_overrides(&ProviderAuthOverridesFile::default())?;
+        return Ok(());
+    };
+
+    for (model_id, backup) in &overrides.models {
+        let Some(item) = models.get_mut(model_id) else {
+            continue;
+        };
+        let Some(model) = item.as_table_like_mut() else {
+            continue;
+        };
+        match backup.env_key.as_deref() {
+            Some(raw) => {
+                model.insert("env_key", config_value_item(raw)?);
+            }
+            None => {
+                model.remove("env_key");
+            }
+        }
+    }
+
+    // Remove model tables that Grox itself created only when they have not
+    // gained any user settings in the meantime.
+    let created: Vec<String> = overrides
+        .models
+        .iter()
+        .filter_map(|(id, backup)| (!backup.model_existed).then_some(id.clone()))
+        .collect();
+    for model_id in created {
+        let remove = models
+            .get(&model_id)
+            .and_then(Item::as_table_like)
+            .is_some_and(|model| model.is_empty());
+        if remove {
+            models.remove(&model_id);
+        }
+    }
+
+    atomic_write(&path, &document.to_string())?;
+    restrict_private_file(&path)?;
+    write_provider_auth_overrides(&ProviderAuthOverridesFile::default())
+}
+
+fn apply_grox_provider_auth_overrides(model_ids: &[String]) -> Result<(), String> {
+    // Always restore before applying the next provider. This keeps the backup
+    // chain one level deep and lets every switch begin from the user's config.
+    restore_grox_provider_auth_overrides()?;
+    let mut model_ids: Vec<String> = model_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    model_ids.sort();
+    model_ids.dedup();
+    if model_ids.is_empty() {
+        return Ok(());
+    }
+
+    let home = grok_home()?;
+    let path = home.join("config.toml");
+    let content = if path.exists() {
+        read_bounded_text(&path, MAX_CONFIG_BYTES)?
+    } else {
+        String::new()
+    };
+    let mut document = parse_grok_config_document(&content)?;
+    let mut backups = BTreeMap::new();
+    for model_id in model_ids {
+        let (model, existed) = model_table_mut(&mut document, &model_id)?;
+        backups.insert(
+            model_id,
+            ProviderModelAuthBackup {
+                model_existed: existed,
+                env_key: model.get("env_key").map(ToString::to_string),
+            },
+        );
+        // Upstream's documented highest-precedence credential selector. This
+        // prevents an already logged-in OAuth token from being sent to a
+        // compatible endpoint in place of that provider's API key.
+        model.insert("env_key", toml_value("XAI_API_KEY"));
+    }
+    atomic_write(&path, &document.to_string())?;
+    restrict_private_file(&path)?;
+    write_provider_auth_overrides(&ProviderAuthOverridesFile { models: backups })
+}
+
+fn compatible_profile_model_ids(profile: &StoredProviderProfile) -> Vec<String> {
+    let mut models = profile.available_models.clone();
+    models.extend(profile.resident_models.clone());
+    if let Some(model) = profile.model.as_ref() {
+        models.push(model.clone());
+    }
+    checked_model_ids(models).unwrap_or_default()
+}
+
+fn default_compatible_model_ids() -> Vec<String> {
+    // The one-off compatible form has no persisted model catalogue. Cover the
+    // standard Grok model ids so an existing Grox session does not fall back
+    // to its cached OAuth token before the user opens a named provider profile.
+    vec![
+        "grok-build".to_string(),
+        "grok-4.5".to_string(),
+        "grok-4.3-fast".to_string(),
+    ]
+}
+
 fn provider_profile_summary(profile: &StoredProviderProfile) -> ProviderProfileSummary {
     let mut resident_models = profile.resident_models.clone();
     if resident_models.is_empty() {
@@ -2108,6 +2352,7 @@ fn activate_provider_profile(id: String) -> Result<(), String> {
         &profile.name,
         profile.api_backend,
     )?;
+    apply_grox_provider_auth_overrides(&compatible_profile_model_ids(&profile))?;
     let path = grok_home()?.join(".env");
     let current = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
     atomic_write(&path, &replace_managed_env_block(&current, &replacement))?;
@@ -2125,6 +2370,7 @@ fn delete_provider_profile(id: String) -> Result<(), String> {
         return Err("供应商档案不存在".into());
     }
     if value.active_id.as_deref() == Some(id.as_str()) {
+        restore_grox_provider_auth_overrides()?;
         let path = grok_home()?.join(".env");
         let current = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
         atomic_write(&path, &replace_managed_env_block(&current, ""))?;
@@ -2136,7 +2382,7 @@ fn delete_provider_profile(id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn read_provider_status() -> Result<ProviderStatus, String> {
-    let values = parse_env_file(&grok_home()?.join(".env"));
+    let values = parse_grox_managed_provider_env(&grok_home()?.join(".env"));
     let api_key = values
         .get("XAI_API_KEY")
         .filter(|value| !value.trim().is_empty());
@@ -2163,7 +2409,7 @@ fn configure_provider(request: ProviderConfig) -> Result<(), String> {
     let home = grok_home()?;
     let path = home.join(".env");
     let current = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
-    let current_values = parse_env_file(&path);
+    let current_values = parse_grox_managed_provider_env(&path);
     let requested_key = request
         .api_key
         .as_deref()
@@ -2175,13 +2421,18 @@ fn configure_provider(request: ProviderConfig) -> Result<(), String> {
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let replacement = match request.kind.as_str() {
-        "oauth" => String::new(),
+        "oauth" => {
+            restore_grox_provider_auth_overrides()?;
+            String::new()
+        }
         "official" => {
+            restore_grox_provider_auth_overrides()?;
             let key = requested_key.or(saved_key).ok_or("API Key 不能为空")?;
             let key = checked_api_key(key)?;
             format!("XAI_API_KEY={}", env_value(key))
         }
         "compatible" => {
+            apply_grox_provider_auth_overrides(&default_compatible_model_ids())?;
             let key = requested_key.or(saved_key).ok_or("API Key 不能为空")?;
             compatible_provider_env(
                 key,
@@ -2401,14 +2652,11 @@ async fn generate_media(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Ok(home) = grok_home() {
-        for (key, value) in parse_env_file(&home.join(".env")) {
-            command.env(key, value);
-        }
-    }
-    for (key, value) in GROX_PRIVACY_ENV {
-        command.env(key, value);
-    }
+    // Keep media generation on the same authentication path as a terminal
+    // invocation. API variables are added only for the provider explicitly
+    // managed by Grox; OAuth gets a clean official CLI environment.
+    command.env("GROK_CLIENT_NAME", UPSTREAM_CLI_CLIENT_NAME);
+    apply_grox_provider_environment(&mut command);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -2614,51 +2862,11 @@ async fn acp_spawn(
     if let Some(version) = runtime.version.as_deref().and_then(cli_version_number) {
         command.env("GROK_CLIENT_VERSION", version.to_string());
     }
-    if let Ok(home) = grok_home() {
-        for (key, value) in parse_env_file(&home.join(".env")) {
-            command.env(key, value);
-        }
-    }
-    // Provider profiles are authoritative at process start. This also migrates
-    // profiles saved by older Grox versions whose managed .env block predates
-    // GROK_MODELS_API_BACKEND, without exposing or rewriting the stored key.
-    if let Ok(profiles) = read_provider_profiles_file() {
-        if let Some(profile) = profiles.active_id.as_deref().and_then(|active_id| {
-            profiles
-                .profiles
-                .iter()
-                .find(|profile| profile.id == active_id)
-        }) {
-            // A stored profile that no longer passes validation (written by an
-            // older build, hand-edited, ...) must not abort the whole spawn:
-            // skip the injection so the agent still starts, and let the user
-            // fix the profile in settings instead of facing a dead app.
-            let injected = checked_service_url(&profile.base_url, "服务地址")
-                .and_then(|base| compatible_models_url(&base).map(|list| (base, list)))
-                .map(|(base, list)| {
-                    command
-                        .env("XAI_API_KEY", &profile.api_key)
-                        .env("GROK_MODELS_BASE_URL", &base)
-                        .env("GROK_MODELS_LIST_URL", list)
-                        .env(
-                            "GROK_MODELS_API_BACKEND",
-                            profile.api_backend.resolved(&profile.name, &base),
-                        );
-                });
-            if let Err(error) = injected {
-                eprintln!(
-                    "grox: 跳过无效的供应商档案 {}（{}）：{error}",
-                    profile.name, profile.id
-                );
-            }
-        }
-    }
-    // This is deliberately applied after the user environment so neither a
-    // stale config nor a server-controlled flag can re-enable background data
-    // collection in the official CLI process launched by Grox.
-    for (key, value) in GROX_PRIVACY_ENV {
-        command.env(key, value);
-    }
+    // The terminal CLI identifies itself as `grok-shell`; passing a desktop
+    // client marker here causes OAuth requests to hit a different upstream
+    // eligibility gate. Preserve official CLI identity end to end.
+    command.env("GROK_CLIENT_NAME", UPSTREAM_CLI_CLIENT_NAME);
+    apply_grox_provider_environment(&mut command);
 
     #[cfg(windows)]
     {
@@ -3353,15 +3561,123 @@ mod tests {
     }
 
     #[test]
-    fn official_cli_privacy_environment_is_fail_closed() {
-        let values = GROX_PRIVACY_ENV.into_iter().collect::<BTreeMap<_, _>>();
-        assert_eq!(values.get("GROX_PRIVACY_MODE"), Some(&"1"));
-        assert_eq!(values.get("DISABLE_TELEMETRY"), Some(&"1"));
-        assert_eq!(values.get("DISABLE_ERROR_REPORTING"), Some(&"1"));
-        assert_eq!(values.get("GROK_TELEMETRY_ENABLED"), Some(&"0"));
-        assert_eq!(values.get("GROK_TELEMETRY_TRACE_UPLOAD"), Some(&"0"));
-        assert_eq!(values.get("GROK_EXTERNAL_OTEL"), Some(&"0"));
-        assert_eq!(values.get("OTEL_LOGS_EXPORTER"), Some(&"none"));
+    fn compatible_model_auth_override_wins_without_damaging_existing_toml() {
+        let mut document = parse_grok_config_document(
+            r#"
+[cli]
+default_model = "grok-4.5"
+
+[model."grok-4.5"]
+name = "Personal model label"
+env_key = ["PERSONAL_GATEWAY_KEY", "FALLBACK_KEY"]
+"#,
+        )
+        .unwrap();
+        let (model, existed) = model_table_mut(&mut document, "grok-4.5").unwrap();
+        assert!(existed);
+        let original = model.get("env_key").map(ToString::to_string);
+        model.insert("env_key", toml_value("XAI_API_KEY"));
+
+        let rendered = document.to_string();
+        assert!(rendered.contains("name = \"Personal model label\""));
+        assert!(rendered.contains("env_key = \"XAI_API_KEY\""));
+
+        let mut restored = parse_grok_config_document(&rendered).unwrap();
+        let (model, _) = model_table_mut(&mut restored, "grok-4.5").unwrap();
+        model.insert("env_key", config_value_item(&original.unwrap()).unwrap());
+        let restored = restored.to_string();
+        assert!(restored.contains("PERSONAL_GATEWAY_KEY"));
+        assert!(restored.contains("FALLBACK_KEY"));
+        assert!(restored.parse::<Document>().is_ok());
+    }
+
+    #[test]
+    fn managed_provider_environment_does_not_inherit_unmarked_values() {
+        let env = r#"
+XAI_API_KEY=terminal-key
+GROK_MODELS_BASE_URL=https://terminal.example/v1
+
+# >>> Grox managed provider
+XAI_API_KEY="grox-key"
+GROK_MODELS_BASE_URL="https://gateway.example/v1"
+GROK_MODELS_LIST_URL="https://gateway.example/v1/models"
+GROK_MODELS_API_BACKEND="responses"
+# <<< Grox managed provider
+
+UNRELATED=value
+"#;
+        let path = std::env::temp_dir().join(format!(
+            "grox-managed-provider-env-{}-{}.env",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, env).unwrap();
+        let values = parse_grox_managed_provider_env(&path);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(values.get("XAI_API_KEY"), Some(&"grox-key".to_string()));
+        assert_eq!(
+            values.get("GROK_MODELS_BASE_URL"),
+            Some(&"https://gateway.example/v1".to_string())
+        );
+        assert!(!values.contains_key("UNRELATED"));
+    }
+
+    #[test]
+    fn provider_login_modes_keep_their_environment_boundaries() {
+        let path = std::env::temp_dir().join(format!(
+            "grox-provider-mode-{}-{}.env",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        // OAuth has no managed provider block, so an official subscription
+        // never receives API-key or gateway configuration from Grox.
+        fs::write(&path, "XAI_API_KEY=inherited-shell-key\n").unwrap();
+        assert!(parse_grox_managed_provider_env(&path).is_empty());
+
+        // Official API-key mode gets its key only; it must not become a
+        // custom OpenAI-compatible endpoint.
+        fs::write(
+            &path,
+            replace_managed_env_block("", "XAI_API_KEY=official-key"),
+        )
+        .unwrap();
+        let official = parse_grox_managed_provider_env(&path);
+        assert_eq!(official.get("XAI_API_KEY"), Some(&"official-key".to_string()));
+        assert!(!official.contains_key("GROK_MODELS_BASE_URL"));
+
+        // Compatible mode intentionally carries the full endpoint contract.
+        let compatible = compatible_provider_env(
+            "gateway-key",
+            "https://gateway.example/v1",
+            "gateway",
+            ProviderApiBackend::Responses,
+        )
+        .unwrap();
+        fs::write(&path, replace_managed_env_block("", &compatible)).unwrap();
+        let gateway = parse_grox_managed_provider_env(&path);
+        assert_eq!(gateway.get("XAI_API_KEY"), Some(&"gateway-key".to_string()));
+        assert_eq!(
+            gateway.get("GROK_MODELS_BASE_URL"),
+            Some(&"https://gateway.example/v1".to_string())
+        );
+        assert_eq!(
+            gateway.get("GROK_MODELS_API_BACKEND"),
+            Some(&"responses".to_string())
+        );
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn upstream_cli_identity_is_not_the_unreleased_desktop_client() {
+        assert_eq!(UPSTREAM_CLI_CLIENT_NAME, "grok-shell");
+        assert_ne!(UPSTREAM_CLI_CLIENT_NAME, "grok-desktop");
     }
 
     #[test]

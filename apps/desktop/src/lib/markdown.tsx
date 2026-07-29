@@ -97,8 +97,68 @@ export function normalizeMathDelimiters(text: string): string {
   }).join("\n");
 }
 
+/*
+ * The CLI usually emits normal GFM tables. Some streamed model responses,
+ * however, collapse the header, divider and body into one physical line:
+ *
+ *   | Name | Purpose |---|---| tool-a | … | tool-b | … |
+ *
+ * A Markdown parser must treat that as a paragraph because line breaks are
+ * structural in GFM. Recover the unambiguous shape before parsing it. Fenced
+ * code is deliberately left untouched so source examples stay byte-for-byte.
+ */
+function restoreCollapsedTables(text: string): string {
+  let fence: { marker: string; length: number } | undefined;
+
+  return text.split("\n").map((line) => {
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (fenceMatch && fenceMatch[1][0] === fence.marker && fenceMatch[1].length >= fence.length) fence = undefined;
+      return line;
+    }
+    if (fenceMatch) {
+      fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length };
+      return line;
+    }
+
+    // A GFM divider contains at least two divider cells, e.g. |---|---|.
+    // It is safe to use as a recovery signal because ordinary prose almost
+    // never contains this exact sequence.
+    const divider = /\|(?:\s*:?-{3,}:?\s*\|){2,}/.exec(line);
+    if (!divider || divider.index === undefined) return line;
+
+    const tableStart = line.indexOf("|");
+    if (tableStart < 0 || tableStart >= divider.index) return line;
+
+    let header = line.slice(tableStart, divider.index).trimEnd();
+    const columns = (divider[0].match(/\|/g) ?? []).length - 1;
+    if (columns < 2 || (header.match(/\|/g) ?? []).length < columns) return line;
+    if (!header.endsWith("|")) header += " |";
+    const trailing = line.slice(divider.index + divider[0].length).trim();
+    if (!trailing) return `${line.slice(0, tableStart)}${header}\n${divider[0]}`;
+
+    const cells = trailing
+      .replace(/^\|\s*/, "")
+      .replace(/\|\s*$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    if (cells.length < columns || cells.length % columns !== 0) return line;
+
+    const rows: string[] = [];
+    for (let index = 0; index < cells.length; index += columns) {
+      rows.push(`| ${cells.slice(index, index + columns).join(" | ")} |`);
+    }
+    return `${line.slice(0, tableStart)}${header}\n${divider[0]}\n${rows.join("\n")}`;
+  }).join("\n");
+}
+
+function wrapTables(html: string): string {
+  return html.replace(/<table>/g, '<div class="md-table-wrap"><table>').replace(/<\/table>/g, "</table></div>");
+}
+
 export function renderMarkdownHtml(text: string): string {
-  const rendered = marked.parse(normalizeMathDelimiters(text), { async: false });
+  const normalized = restoreCollapsedTables(normalizeMathDelimiters(text));
+  const rendered = wrapTables(marked.parse(normalized, { async: false }));
   return DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true, mathMl: true },
     FORBID_TAGS: ["style", "iframe", "object", "embed"],

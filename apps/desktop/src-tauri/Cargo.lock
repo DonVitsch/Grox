@@ -1490,6 +1490,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "toml_edit 0.20.2",
  "uiautomation",
  "url",
  "windows 0.58.0",

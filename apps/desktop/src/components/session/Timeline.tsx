@@ -173,13 +173,17 @@ interface TurnGroupProps {
 function TurnGroup({ turn, sessionId, status, active, workflow }: TurnGroupProps) {
   const { language } = useI18n();
   const complete = !active || status === "idle";
-  const [processOpen, setProcessOpen] = useState(!complete);
+  // Public thought/tool events are meaningful audit trail. Start them open so
+  // their timing and summaries are visible; each dense child card remains
+  // independently collapsible.
+  const hasInspectableProcess = turn.blocks.some((block) => block.type === "thinking" || block.type === "tool" || block.type === "plan");
+  const [processOpen, setProcessOpen] = useState(() => !complete || hasInspectableProcess);
   const user = turn.blocks.find((block): block is Extract<SessionBlock, { type: "user" }> => block.type === "user");
   const deepResearch = isDeepResearchRequest(user);
   const query = user ? deepResearchQuery(user.text) : undefined;
 
   useEffect(() => {
-    if (complete) setProcessOpen(false);
+    if (!complete) setProcessOpen(true);
   }, [complete]);
 
   if (!complete) {
@@ -237,9 +241,7 @@ function TurnGroup({ turn, sessionId, status, active, workflow }: TurnGroupProps
         toolCount ? `${toolCount} tools` : "",
         otherEventCount ? `${otherEventCount} runtime events` : "",
       ].filter(Boolean);
-  const processSummary = summaryParts.length > 0
-    ? summaryParts.join(" · ")
-    : language === "zh-CN" ? "服务商未公开思考或工具过程" : "Provider did not expose reasoning or tool activity";
+  const processSummary = summaryParts.join(" · ");
 
   const finishedAt = Math.max(user?.ts ?? 0, ...turn.blocks.map((block) => block.type === "tool" ? block.call.endedAt ?? block.ts : block.ts));
   const turnElapsed = user && finishedAt > user.ts ? finishedAt - user.ts : 0;
@@ -248,7 +250,12 @@ function TurnGroup({ turn, sessionId, status, active, workflow }: TurnGroupProps
     <section className="timeline-turn mb-8">
       {user && <UserMsg block={user} rewindPromptIndex={turn.promptIndex >= 0 ? turn.promptIndex : undefined} />}
       {deepResearch && <DeepResearchToolCard run={workflow} query={query} />}
-      {!deepResearch && <div className="process-complete mb-5">
+      {/*
+       * ACP is allowed to return only a final answer. That is not a tool
+       * invocation, nor evidence that a provider hid one. Keep the transcript
+       * quiet in that case instead of manufacturing a "process" row.
+       */}
+      {!deepResearch && process.length > 0 && <div className="process-complete mb-5">
         <button className="process-summary" onClick={() => setProcessOpen((open) => !open)}>
           <Icon name={processOpen ? "chevronDown" : "chevronRight"} size={9} className="shrink-0 text-dim" />
           <span className="shrink-0 text-[10.5px] font-medium text-fg2">{language === "zh-CN" ? "已处理" : "Processed"}</span>
@@ -257,11 +264,7 @@ function TurnGroup({ turn, sessionId, status, active, workflow }: TurnGroupProps
         </button>
         {processOpen && (
           <div className="process-sequence process-rail ml-[7px] mt-2 border-l border-line2 pb-1 pl-5 pt-2">
-            {process.length > 0 ? (
-              <RenderSequence blocks={process} sessionId={sessionId} processing />
-            ) : (
-              <p className="mb-3 text-[10.5px] leading-relaxed text-dim">{language === "zh-CN" ? "本轮 API 只返回了最终答复；无法据此判断服务商内部是否调用了工具。" : "The API returned only a final answer; provider-internal tool usage cannot be determined from this response."}</p>
-            )}
+            <RenderSequence blocks={process} sessionId={sessionId} processing />
           </div>
         )}
         {turnElapsed > 0 && <div className="turn-elapsed"><span>{language === "zh-CN" ? `已处理 ${turnElapsed < 1000 ? `${turnElapsed}ms` : `${(turnElapsed / 1000).toFixed(turnElapsed < 10_000 ? 1 : 0)}s`}` : `Processed in ${(turnElapsed / 1000).toFixed(1)}s`}</span><i /></div>}

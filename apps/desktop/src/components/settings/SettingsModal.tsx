@@ -6,6 +6,7 @@ import { EFFORTS } from "../../bridge/types";
 import { useDesktop } from "../../state/store";
 import { usePreferences } from "../../state/preferences";
 import { useI18n } from "../../lib/i18n";
+import { fmtBillingDate, fmtBillingValue } from "../../lib/format";
 import { Icon } from "../fx/Icon";
 import { Wordmark } from "../fx/Wordmark";
 
@@ -162,7 +163,13 @@ function Account() {
     <Heading title={zh ? "账户与配置" : "Account & configuration"} description={zh ? "身份、模型服务与 Grok 本地配置集中在这里管理。OAuth 目录实时跟随 Grok，API 模式由你控制端点与常驻模型。" : "Manage identity, model providers, and local Grok configuration in one place. OAuth follows Grok live; API modes keep endpoints and the resident model under your control."} />
     <div className="rounded-[6px] border border-line2 bg-raise p-4">
       <div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-line2 bg-high">{account?.profileImageUrl ? <img src={account.profileImageUrl} className="h-full w-full object-cover" alt="" /> : <Icon name={provider.kind === "oauth" ? "user" : "bolt"} size={16} className="text-dim" />}</div><div className="min-w-0 flex-1"><p className="truncate text-[12px] text-fg">{account?.email ?? (provider.kind === "official" ? "xAI API" : provider.kind === "compatible" ? (provider.baseUrl ?? t("compatibleApi")) : t("signInRequired"))}</p><p className="mt-0.5 font-mono text-[9.5px] text-acc">{provider.kind === "oauth" ? (billing?.subscriptionTier ?? account?.subscriptionTier ?? "GROK OAUTH") : provider.kind === "official" ? "XAI OFFICIAL API" : "OPENAI COMPATIBLE"}</p></div><ActionButton onClick={() => void refresh()}>{loading ? t("loading") : t("refresh")}</ActionButton></div>
-      <div className="mt-4 grid grid-cols-2 gap-2">{provider.kind === "oauth" ? <><Metric label={t("fiveHour")} value={t("unavailable")} /><Metric label={t("weekly")} value={billing?.creditUsagePercent !== undefined ? `${Math.round(billing.creditUsagePercent)}%` : t("unavailable")} /></> : <><Metric label={zh ? "API 密钥" : "API key"} value={provider.hasApiKey ? (zh ? "已安全保存" : "Stored securely") : (zh ? "未设置" : "Not configured")} /><Metric label={zh ? "可用模型" : "Available models"} value={`${models.length}`} /></>}</div>
+      <div className="mt-4 grid grid-cols-2 gap-2">{provider.kind === "oauth" ? <>
+        <Metric label={zh ? "当前周期" : "Current period"} value={billing?.periodType ? billing.periodType.toLocaleUpperCase() : (zh ? "上游未公开" : "Not exposed")} />
+        <Metric label={zh ? "周期结束" : "Period ends"} value={fmtBillingDate(billing?.periodEnd, language)} />
+        <Metric label={zh ? "按量上限" : "On-demand cap"} value={fmtBillingValue(billing?.onDemandCap)} />
+        <Metric label={zh ? "预付余额" : "Prepaid balance"} value={fmtBillingValue(billing?.prepaidBalance)} />
+      </> : <><Metric label={zh ? "API 密钥" : "API key"} value={provider.hasApiKey ? (zh ? "已安全保存" : "Stored securely") : (zh ? "未设置" : "Not configured")} /><Metric label={zh ? "可用模型" : "Available models"} value={`${models.length}`} /></>}</div>
+      {provider.kind === "oauth" && <p className="mt-3 text-[10px] leading-relaxed text-dim">{billing?.creditUsagePercent !== undefined ? (zh ? `订阅额度已使用 ${Math.round(billing.creditUsagePercent)}%。` : `${Math.round(billing.creditUsagePercent)}% of plan quota used.`) : (zh ? "Grok Build 当前未公开五小时或订阅剩余额度；这里展示 CLI 实际返回的订阅周期与按量额度。" : "Grok Build does not currently expose five-hour or remaining subscription quota; the values above are the billing data actually returned by the CLI.")}</p>}
     </div>
     <div className="mt-3 flex gap-2">{provider.kind === "oauth" && !account?.authenticated && <ActionButton tone="accent" onClick={() => openSetup(true)}>{t("login")}</ActionButton>}{provider.kind === "oauth" && account?.authenticated && <ActionButton tone="danger" onClick={() => void logout()}>{t("logout")}</ActionButton>}<ActionButton onClick={() => void invoke("open_external", { url: "https://grok.com/supergrok?referrer=grok-build" })}>{t("upgrade")}</ActionButton></div>
     <ProviderAndModels />

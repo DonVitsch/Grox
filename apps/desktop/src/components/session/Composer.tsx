@@ -39,6 +39,8 @@ export function Composer() {
   const [readingFiles, setReadingFiles] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const slashOptionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const sendPrompt = useDesktop((s) => s.sendPrompt);
   const composer = useDesktop((s) => s.activeId ? s.sessionComposers[s.activeId] : undefined);
@@ -151,6 +153,13 @@ export function Composer() {
 
   useEffect(() => setSlashIdx(0), [query]);
 
+  // Keep the keyboard selection in view. The runtime can expose more commands
+  // than fit above the composer, so a selected command must never be hidden.
+  useEffect(() => {
+    if (!slashOpen) return;
+    slashOptionRefs.current[slashIdx]?.scrollIntoView({ block: "nearest" });
+  }, [slashIdx, slashOpen, matches.length]);
+
   // auto-grow
   useEffect(() => {
     const el = taRef.current;
@@ -252,16 +261,25 @@ export function Composer() {
       <div className="relative mx-auto max-w-[760px]">
         {/* slash menu */}
         {slashOpen && matches.length > 0 && (
-          <div className="absolute bottom-full left-0 z-40 mb-2 w-full overflow-hidden rounded-[6px] border border-line2 bg-raise py-1 shadow-[0_8px_28px_rgba(0,0,0,0.55)] animate-fade-up">
+          <div
+            ref={slashMenuRef}
+            role="listbox"
+            aria-label={language === "zh-CN" ? "斜杠命令" : "Slash commands"}
+            className="absolute bottom-full left-0 z-40 mb-2 w-full overflow-y-auto overflow-x-hidden overscroll-contain rounded-[6px] border border-line2 bg-raise py-1 shadow-[0_8px_28px_rgba(0,0,0,0.55)] animate-fade-up"
+            style={{ maxHeight: "min(24rem, calc(100dvh - 13rem))" }}
+          >
             {matches.map((c, i) => (
               <button
                 key={c.id}
+                ref={(element) => { slashOptionRefs.current[i] = element; }}
+                role="option"
+                aria-selected={i === slashIdx}
                 onMouseEnter={() => setSlashIdx(i)}
                 onClick={() => {
                   chooseSlashCommand(c);
                 }}
-                className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${
-                  i === slashIdx ? "bg-high" : ""
+                className={`flex w-full items-center gap-3 px-3 py-1.5 text-left transition-colors ${
+                  i === slashIdx ? "bg-high" : "hover:bg-high/60"
                 }`}
               >
                 <span className="w-20 shrink-0 font-mono text-[11px] text-acc">{c.id}</span>
