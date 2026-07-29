@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="title desc">
   <title id="title">dandandujie/Grox Star History</title>
-  <desc id="desc">GitHub Star 历史曲线，当前 42 Stars，数据截至 2026-07-29T16:30:30.000Z</desc>
+  <desc id="desc">GitHub Star 历史曲线，当前 45 Stars，数据截至 2026-07-29T17:13:46.000Z</desc>
   <defs>
     <filter id="rough" x="-4%" y="-4%" width="108%" height="108%">
       <feTurbulence type="fractalNoise" baseFrequency="0.008 0.12" numOctaves="2" seed="17" result="noise"/>
@@ -11,7 +11,7 @@
   <g filter="url(#rough)" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <path d="M 86 390 C 225 387, 336 393, 478 390 S 720 393, 926 389" stroke="#111111" stroke-width="4.5"/>
     <path d="M 86 390 C 82 322, 89 254, 85 188 S 89 88, 86 26" stroke="#111111" stroke-width="4.5"/>
-    <path d="M 86.0 390.0 L 136.9 382.7 L 137.1 375.4 L 138.1 368.2 L 138.6 360.9 L 138.8 353.6 L 139.3 346.3 L 139.9 339.0 L 151.7 331.8 L 151.9 324.5 L 153.4 317.2 L 158.4 309.9 L 169.2 302.6 L 176.7 295.4 L 185.9 288.1 L 191.9 280.8 L 192.2 273.5 L 198.6 266.2 L 215.1 259.0 L 229.8 251.7 L 243.4 244.4 L 256.1 237.1 L 269.4 229.8 L 275.2 222.6 L 286.2 215.3 L 436.3 208.0 L 443.8 200.7 L 517.7 193.4 L 586.5 186.2 L 611.6 178.9 L 612.5 171.6 L 612.6 164.3 L 612.7 157.0 L 672.7 149.8 L 729.8 142.5 L 749.8 135.2 L 775.8 127.9 L 814.9 120.6 L 905.6 113.4 L 906.9 106.1 L 908.0 98.8 L 925.3 91.5 L 926.0 84.2 L 926.0 84.2" stroke="#e84424" stroke-width="4" opacity="0.98"/>
+    <path d="M 86.0 390.0 L 136.8 382.7 L 137.0 375.4 L 137.9 368.2 L 138.4 360.9 L 138.7 353.6 L 139.1 346.3 L 139.8 339.0 L 151.5 331.8 L 151.7 324.5 L 153.2 317.2 L 158.2 309.9 L 169.0 302.6 L 176.4 295.4 L 185.6 288.1 L 191.6 280.8 L 192.0 273.5 L 198.3 266.2 L 214.8 259.0 L 229.4 251.7 L 243.0 244.4 L 255.6 237.1 L 268.9 229.8 L 274.7 222.6 L 285.7 215.3 L 435.4 208.0 L 442.8 200.7 L 516.6 193.4 L 585.2 186.2 L 610.2 178.9 L 611.1 171.6 L 611.1 164.3 L 611.2 157.0 L 671.1 149.8 L 728.1 142.5 L 748.0 135.2 L 773.9 127.9 L 812.9 120.6 L 903.3 113.4 L 904.6 106.1 L 905.8 98.8 L 923.0 91.5 L 923.7 84.2 L 924.7 77.0 L 925.9 69.7 L 926.0 62.4 L 926.0 62.4" stroke="#e84424" stroke-width="4" opacity="0.98"/>
   </g>
   <text x="73" y="324.2" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">10</text>
   <text x="73" y="251.4" text-anchor="end" fill="#242424" font-family="'Comic Sans MS','Segoe Print','Bradley Hand',cursive" font-size="21">20</text>
