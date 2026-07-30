@@ -25,7 +25,6 @@ export function TitleBar() {
   const { language } = useI18n();
   const activeId = useDesktop((s) => s.activeId);
   const meta = useDesktop((s) => s.sessionIndex.find((m) => m.id === s.activeId));
-  const bridgeKind = useDesktop((s) => s.bridgeKind);
   const toggleInspector = useDesktop((s) => s.toggleInspector);
   const inspectorOpen = useDesktop((s) => s.inspectorOpen);
   const toggleTerminal = useDesktop((s) => s.toggleTerminal);
@@ -59,14 +58,14 @@ export function TitleBar() {
 
       {/* right cluster */}
       <div className="flex shrink-0 items-center gap-1">
-        <span className={`chip mr-1 ${bridgeKind === "mock" ? "" : "!text-acc !border-acc-dim"}`}>
-          <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${
-              bridgeKind === "mock" ? "bg-dim" : "bg-acc animate-pulse-dot"
-            }`}
-          />
-          {bridgeKind === "mock" ? "MOCK LINK" : "ACP LINK"}
-        </span>
+        <button
+          className="chip mr-1"
+          onClick={() => window.dispatchEvent(new Event("grox:open-update-center"))}
+          title={language === "zh-CN" ? "检查更新并查看更新日志" : "Check for updates and view the changelog"}
+        >
+          <Icon name="refresh" size={11} />
+          <span>{language === "zh-CN" ? "更新日志" : "CHANGELOG"}</span>
+        </button>
 
         <button
           className="chip"

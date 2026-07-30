@@ -6,7 +6,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { bridge } from "../bridge";
-import { MODELS } from "../bridge/types";
+import { isSessionTerminal, MODELS } from "../bridge/types";
 import type {
   AgentMode,
   AccountInfo,
@@ -132,6 +132,8 @@ interface DesktopState {
   providerProfiles: ProviderProfileSummary[];
   activeProviderProfileId?: string;
   providerSwitching: boolean;
+  /** The new provider is ready while its active transcript attaches. */
+  restoringSessionId: string | null;
   runtime: GrokRuntimeInfo | null;
   runtimeBusy: boolean;
   accountLoading: boolean;
@@ -156,6 +158,8 @@ interface DesktopState {
   mode: AgentMode;
   permissionMode: PermissionMode;
   sessionComposers: Record<string, SessionComposerState>;
+  /** Model choices made during a turn, applied only when that turn settles. */
+  pendingSessionModels: Record<string, string>;
 
   inspectorOpen: boolean;
   inspectorTab: InspectorTab;
@@ -452,11 +456,16 @@ function providerModelState(state: ModelState, profile?: ProviderProfileSummary)
   };
 }
 
+function providerDefaultModel(profile?: ProviderProfileSummary) {
+  return profile?.residentModels[0] ?? profile?.availableModels[0];
+}
+
 /* StrictMode mounts effects twice in dev — subscribe once, ever. */
 let bridgeSubscribed = false;
 let workspaceWatchTimer: number | undefined;
 let workspaceWatchTick = 0;
 let pendingLaunch: { text: string; attachments: PromptAttachment[] } | undefined;
+let providerRestoreGeneration = 0;
 
 function scheduleSessionCatalog(metas: SessionMeta[]) {
   pendingCatalog = metas;
@@ -508,26 +517,68 @@ function blocksBeforePrompt(blocks: SessionBlock[], targetPromptIndex: number): 
 }
 
 export const useDesktop = create<DesktopState>((set, get) => {
+  const applyQueuedModel = (sessionId: string) => {
+    const state = get();
+    const model = state.pendingSessionModels[sessionId];
+    const session = state.sessions[sessionId];
+    if (!model || !session || !isSessionTerminal(session.status)) return;
+    const current = state.sessionComposers[sessionId] ?? {
+      text: "",
+      attachments: [],
+      model: state.model,
+      effort: state.effort,
+      mode: state.mode,
+      permissionMode: state.permissionMode,
+    };
+    const pendingSessionModels = { ...state.pendingSessionModels };
+    delete pendingSessionModels[sessionId];
+    const sessionComposers = {
+      ...state.sessionComposers,
+      [sessionId]: { ...current, model },
+    };
+    localStorage.setItem("grok.model", model);
+    persistSessionComposers(sessionComposers);
+    set({
+      pendingSessionModels,
+      sessionComposers,
+      ...(state.activeId === sessionId ? { model } : {}),
+    });
+  };
+
   const applyEvent = (e: BridgeEvent) => {
     const { sessions, sessionIndex } = get();
 
-    const withSession = (sessionId: string, fn: (s: Session) => Session, touchCatalogue = true) => {
+    const withSession = (
+      sessionId: string,
+      fn: (s: Session) => Session,
+      touchCatalogue = true,
+      completionUnread?: boolean,
+    ) => {
       const state = get();
       const s = state.sessions[sessionId];
       if (!s) return;
       const next = { ...fn(s), updatedAt: Date.now() };
       if (!touchCatalogue) {
         set({ sessions: { ...state.sessions, [sessionId]: next } });
+        if (isSessionTerminal(next.status)) applyQueuedModel(sessionId);
         return;
       }
       const nextIndex = state.sessionIndex.map((m) =>
-        m.id === sessionId ? { ...m, updatedAt: next.updatedAt } : m,
+        m.id === sessionId
+          ? {
+              ...m,
+              updatedAt: next.updatedAt,
+              lastStatus: next.status,
+              ...(completionUnread === undefined ? {} : { completionUnread }),
+            }
+          : m,
       );
       scheduleSessionCatalog(nextIndex);
       set({
         sessions: { ...state.sessions, [sessionId]: next },
         sessionIndex: nextIndex,
       });
+      if (isSessionTerminal(next.status)) applyQueuedModel(sessionId);
     };
 
     switch (e.type) {
@@ -649,8 +700,13 @@ export const useDesktop = create<DesktopState>((set, get) => {
               status: "running" as const,
             }
           : readySession;
+        const previousMeta = sessionIndex.find((item) => item.id === readySession.id);
         const nextIndex = [
-          decorateSessions([meta])[0],
+          {
+            ...decorateSessions([meta])[0],
+            lastStatus: nextSession.status,
+            completionUnread: previousMeta?.completionUnread ?? false,
+          },
           ...sessionIndex.filter((m) => m.id !== readySession.id),
         ];
         const projects = ensureProject(get().projects, readySession.cwd);
@@ -781,22 +837,57 @@ export const useDesktop = create<DesktopState>((set, get) => {
         }));
         break;
       case "status":
-        withSession(e.sessionId, (s) => ({ ...s, status: e.status }));
+        withSession(
+          e.sessionId,
+          (s) => ({ ...s, status: e.status }),
+          true,
+          e.status === "idle" ? get().activeId !== e.sessionId : e.status === "running" ? false : undefined,
+        );
         break;
       case "usage":
         withSession(e.sessionId, (s) => ({ ...s, usage: e.usage }), false);
         break;
       case "error":
-        withSession(e.sessionId, (s) => ({
-          ...s,
-          status: "idle",
-          blocks: [
-            ...s.blocks,
-            { type: "system", id: uid(), text: e.message, ts: Date.now(), kind: "error" },
-          ],
-        }));
+        withSession(
+          e.sessionId,
+          (s) => ({
+            ...s,
+            status: "failed",
+            blocks: [
+              ...s.blocks,
+              { type: "system", id: uid(), text: e.message, ts: Date.now(), kind: "error" },
+            ],
+          }),
+          true,
+          false,
+        );
         break;
     }
+  };
+
+  // Changing provider replaces the ACP child. Reattach the visible session
+  // only after that replacement, and lock the composer during the short load
+  // so the first request cannot target a dead child process.
+  const restoreActiveSessionAfterProviderSwitch = () => {
+    const { activeId, sessions } = get();
+    if (!activeId || activeId.startsWith("pending-") || !sessions[activeId]) {
+      set({ restoringSessionId: null });
+      return;
+    }
+    const generation = ++providerRestoreGeneration;
+    set({ restoringSessionId: activeId });
+    void bridge.loadSession(activeId).then(
+      () => {
+        if (generation === providerRestoreGeneration) set({ restoringSessionId: null });
+      },
+      (error) => {
+        if (generation !== providerRestoreGeneration) return;
+        set({
+          restoringSessionId: null,
+          startupError: `模型服务已切换，但当前会话同步失败：${error instanceof Error ? error.message : String(error)}`,
+        });
+      },
+    );
   };
 
   return {
@@ -817,6 +908,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
     providerProfiles: [],
     activeProviderProfileId: undefined,
     providerSwitching: false,
+    restoringSessionId: null,
     runtime: null,
     runtimeBusy: false,
     accountLoading: false,
@@ -846,6 +938,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
           ? "bypass"
           : "default",
     sessionComposers: loadSessionComposers(),
+    pendingSessionModels: {},
 
     inspectorOpen: false,
     inspectorTab: "files",
@@ -931,7 +1024,15 @@ export const useDesktop = create<DesktopState>((set, get) => {
     goHome: () => set({ view: "home", activeId: null }),
 
     async openSession(id) {
-      const meta = get().sessionIndex.find((entry) => entry.id === id);
+      const beforeOpen = get();
+      const meta = beforeOpen.sessionIndex.find((entry) => entry.id === id);
+      if (meta?.completionUnread) {
+        const sessionIndex = beforeOpen.sessionIndex.map((entry) =>
+          entry.id === id ? { ...entry, completionUnread: false } : entry,
+        );
+        persistSessionCatalog(sessionIndex);
+        set({ sessionIndex });
+      }
       if (meta && !samePath(meta.cwd, get().workspace)) await get().setWorkspace(meta.cwd);
       const state = get();
       const has = state.sessions[id];
@@ -986,7 +1087,9 @@ export const useDesktop = create<DesktopState>((set, get) => {
               contextMax: 0,
               turns: 0,
             },
-            status: "running",
+            // The ACP session has not been created yet. This is not a turn
+            // that can be aborted; the composer represents this separately.
+            status: "idle",
           },
         },
       }));
@@ -1140,7 +1243,6 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
     async configureProvider(config) {
       const wasComplete = localStorage.getItem("grox.accountSetupComplete") === "1";
-      const activeId = get().activeId;
       localStorage.setItem("grox.accountSetupComplete", "1");
       set({ accountSetupOpen: false });
       try {
@@ -1152,21 +1254,28 @@ export const useDesktop = create<DesktopState>((set, get) => {
         throw error;
       }
       try {
-        if (activeId) await bridge.loadSession(activeId);
-        set({ providerSwitching: false, startupError: null });
+        const [provider] = await Promise.all([
+          bridge.getProviderStatus(),
+          get().refreshProviderProfiles(),
+        ]);
+        // A compatible profile may have left a model id (for example a
+        // provider-specific `grok-4.3-fast`) in the active composer. OAuth
+        // only exposes the models reported by the fresh official agent, so
+        // normalize it before the send lock is lifted rather than making the
+        // first prompt fail a `session/set_model` RPC.
+        await get().refreshModels();
+        set({ provider, providerSwitching: false, startupError: null });
+        restoreActiveSessionAfterProviderSwitch();
       } catch (error) {
         set({
           providerSwitching: false,
-          startupError: `模型服务已切换，但当前会话恢复失败：${error instanceof Error ? error.message : String(error)}`,
+          startupError: `模型服务切换失败：${error instanceof Error ? error.message : String(error)}`,
         });
         throw error;
       }
-      try {
-        await get().refreshProviderProfiles();
-        await Promise.all([get().refreshAccount(), get().refreshModels()]);
-      } catch (error) {
+      void get().refreshAccount().catch((error) => {
         set({ startupError: error instanceof Error ? error.message : String(error) });
-      }
+      });
     },
 
     async refreshProviderProfiles() {
@@ -1182,9 +1291,22 @@ export const useDesktop = create<DesktopState>((set, get) => {
       } catch (error) {
         set({ startupError: `供应商已保存，但模型列表获取失败：${error instanceof Error ? error.message : String(error)}` });
       }
-      if (wasActive) await bridge.activateProviderProfile(profile.id);
+      if (wasActive) {
+        set({ providerSwitching: true });
+        try {
+          // Editing the active profile also replaces the ACP child. Reload the
+          // mission afterwards; otherwise its next turn can stay attached to
+          // the child created for the previous endpoint.
+          await bridge.activateProviderProfile(profile.id);
+          restoreActiveSessionAfterProviderSwitch();
+        } finally {
+          set({ providerSwitching: false });
+        }
+      }
       await get().refreshProviderProfiles();
-      if (get().activeProviderProfileId === profile.id) await get().refreshModels();
+      if (get().activeProviderProfileId === profile.id) {
+        await Promise.all([get().refreshAccount(), get().refreshModels()]);
+      }
       return profile;
     },
 
@@ -1199,34 +1321,42 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     async activateProviderProfile(id) {
-      const previousId = get().activeProviderProfileId;
-      const activeId = get().activeId;
+      const expected = get().providerProfiles.find((profile) => profile.id === id);
       set({ providerSwitching: true });
-      // Reflect the user's choice immediately. ACP restart and model refresh
-      // can take several seconds, but the selector should never feel stuck.
-      set({ activeProviderProfileId: id });
       try {
         await bridge.activateProviderProfile(id);
-      } catch (error) {
-        set({ activeProviderProfileId: previousId, providerSwitching: false });
-        throw error;
-      }
-      try {
-        if (activeId) await bridge.loadSession(activeId);
+        const activeId = get().activeId;
+        const providerPromise = bridge.getProviderStatus();
+        const profilesRefresh = get().refreshProviderProfiles();
+        const provider = await providerPromise;
+        const selectedBase = expected?.baseUrl.replace(/\/+$/, "");
+        const activeBase = provider.baseUrl?.replace(/\/+$/, "");
+        if (provider.kind !== "compatible" || !selectedBase || activeBase !== selectedBase) {
+          throw new Error("供应商配置没有被 ACP 子进程确认，请检查服务地址后重试");
+        }
+        set({ provider });
+        const preferredModel = providerDefaultModel(expected);
+        if (preferredModel) {
+          localStorage.setItem("grok.model", preferredModel);
+          set((state) => {
+            const composer = activeId ? state.sessionComposers[activeId] : undefined;
+            const sessionComposers = activeId && composer
+              ? { ...state.sessionComposers, [activeId]: { ...composer, model: preferredModel } }
+              : state.sessionComposers;
+            if (sessionComposers !== state.sessionComposers) persistSessionComposers(sessionComposers);
+            return { model: preferredModel, sessionComposers };
+          });
+        }
+        await profilesRefresh;
         set({ providerSwitching: false, startupError: null });
+        restoreActiveSessionAfterProviderSwitch();
       } catch (error) {
-        set({
-          providerSwitching: false,
-          startupError: `供应商已切换，但当前会话恢复失败：${error instanceof Error ? error.message : String(error)}`,
-        });
+        set({ providerSwitching: false });
         throw error;
       }
-      try {
-        await get().refreshProviderProfiles();
-        await Promise.all([get().refreshAccount(), get().refreshModels()]);
-      } catch (error) {
+      void Promise.all([get().refreshAccount(), get().refreshModels()]).catch((error) => {
         set({ startupError: error instanceof Error ? error.message : String(error) });
-      }
+      });
     },
 
     async deleteProviderProfile(id) {
@@ -1359,6 +1489,8 @@ export const useDesktop = create<DesktopState>((set, get) => {
       delete nextComposers[id];
       const nextWorkflows = { ...workflows };
       delete nextWorkflows[id];
+      const pendingSessionModels = { ...get().pendingSessionModels };
+      delete pendingSessionModels[id];
       persistSessionComposers(nextComposers);
       persistWorkflowRuns(nextWorkflows);
       const nextIndex = sessionIndex.filter((m) => m.id !== id);
@@ -1368,6 +1500,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
         sessions: rest,
         sessionComposers: nextComposers,
         workflows: nextWorkflows,
+        pendingSessionModels,
         ...(activeId === id ? { activeId: null, view: "home" as View } : {}),
       });
     },
@@ -1409,10 +1542,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     sendPrompt(text, attachments = []) {
-      const { activeId, sessions, model, effort, mode, permissionMode, sessionComposers, providerSwitching } = get();
-      if (providerSwitching) return;
+      const { activeId, sessions, model, effort, mode, permissionMode, sessionComposers, providerSwitching, restoringSessionId } = get();
+      if (providerSwitching || restoringSessionId === activeId) return;
       const session = activeId ? sessions[activeId] : null;
-      if (!session || session.status !== "idle") return;
+      if (!session || !isSessionTerminal(session.status)) return;
       const composer = sessionComposers[session.id] ?? {
         text: "",
         attachments: [],
@@ -1427,8 +1560,13 @@ export const useDesktop = create<DesktopState>((set, get) => {
       const internalWorkflowControl = /^\/workflow\s+(?:pause|resume|stop)\s+\S+(?:\s|$)/i.test(trimmed);
       const titleText = trimmed || attachments.map((attachment) => attachment.name).join(", ");
       const nextIndex = get().sessionIndex.map((m) =>
-        m.id === session.id && m.title === "Untitled mission" && !internalWorkflowControl
-          ? { ...m, title: titleText.slice(0, 56) }
+        m.id === session.id
+          ? {
+              ...m,
+              ...(m.title === "Untitled mission" && !internalWorkflowControl ? { title: titleText.slice(0, 56) } : {}),
+              lastStatus: "running" as const,
+              completionUnread: false,
+            }
           : m,
       );
       persistSessionCatalog(nextIndex);
@@ -1443,6 +1581,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
           ...sessions,
           [session.id]: {
             ...session,
+            status: "running",
             title: session.title === "Untitled mission" && !internalWorkflowControl
               ? titleText.slice(0, 56)
               : session.title,
@@ -1485,26 +1624,26 @@ export const useDesktop = create<DesktopState>((set, get) => {
 
     compact() {
       const { activeId, sessions } = get();
-      if (activeId && sessions[activeId]?.status === "idle") {
+      if (activeId && sessions[activeId] && isSessionTerminal(sessions[activeId].status)) {
         void bridge.compact(activeId);
       }
     },
 
     async listRewindPoints() {
       const { activeId, sessions } = get();
-      if (!activeId || sessions[activeId]?.status !== "idle") return [];
+      if (!activeId || !sessions[activeId] || !isSessionTerminal(sessions[activeId].status)) return [];
       return bridge.listRewindPoints(activeId);
     },
 
     async previewRewind(targetPromptIndex, mode) {
       const { activeId, sessions } = get();
-      if (!activeId || sessions[activeId]?.status !== "idle") throw new Error("请等待当前请求完成后再回退");
+      if (!activeId || !sessions[activeId] || !isSessionTerminal(sessions[activeId].status)) throw new Error("请等待当前请求完成后再回退");
       return bridge.rewind(activeId, targetPromptIndex, mode, false);
     },
 
     async executeRewind(point, mode) {
       const { activeId, sessions, sessionComposers } = get();
-      if (!activeId || sessions[activeId]?.status !== "idle") throw new Error("请等待当前请求完成后再回退");
+      if (!activeId || !sessions[activeId] || !isSessionTerminal(sessions[activeId].status)) throw new Error("请等待当前请求完成后再回退");
       // Rewind results can contain server-side workflow reminders instead of
       // the user's old prompt. A rewind must preserve the unsent composer as
       // it was (including an intentionally empty composer), never turn that
@@ -1565,10 +1704,21 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     setModel: (model) => {
-      const { activeId, sessionComposers, effort, mode, permissionMode } = get();
-      localStorage.setItem("grok.model", model);
-      if (!activeId) return set({ model });
+      const { activeId, sessions, sessionComposers, pendingSessionModels, effort, mode, permissionMode } = get();
+      if (!activeId) {
+        localStorage.setItem("grok.model", model);
+        return set({ model });
+      }
       const current = sessionComposers[activeId] ?? { text: "", attachments: [], model, effort, mode, permissionMode };
+      const session = sessions[activeId];
+      if (session && !isSessionTerminal(session.status)) {
+        const nextPending = { ...pendingSessionModels };
+        if (model === current.model) delete nextPending[activeId];
+        else nextPending[activeId] = model;
+        set({ pendingSessionModels: nextPending });
+        return;
+      }
+      localStorage.setItem("grok.model", model);
       const next = { ...sessionComposers, [activeId]: { ...current, model } };
       persistSessionComposers(next);
       set({ model, sessionComposers: next });
