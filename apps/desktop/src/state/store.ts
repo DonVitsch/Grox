@@ -102,6 +102,7 @@ export interface ProjectMeta {
 interface SessionFlags {
   pinned?: boolean;
   archived?: boolean;
+  completionUnread?: boolean;
 }
 
 export interface SessionComposerState {
@@ -182,10 +183,16 @@ interface DesktopState {
   archiveProject(id: string): void;
   removeProject(id: string): void;
   openProjectInExplorer(id?: string): Promise<void>;
+  createProjectWorktree(id: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
   renameSession(id: string, title: string): void;
   pinSession(id: string): void;
   archiveSession(id: string): void;
+  markSessionUnread(id: string): void;
+  copySessionValue(id: string, value: "cwd" | "id" | "link"): Promise<void>;
+  continueSessionInNewChat(id: string): Promise<void>;
+  continueSessionInNewWorktree(id: string): Promise<void>;
+  openSessionInNewWindow(id: string): Promise<void>;
   setWorkspace(cwd: string): Promise<void>;
   authenticate(): Promise<void>;
   logout(): Promise<void>;
@@ -1171,6 +1178,19 @@ export const useDesktop = create<DesktopState>((set, get) => {
       await invoke("open_in_explorer", { cwd: project?.path ?? get().workspace, path: null });
     },
 
+    async createProjectWorktree(id) {
+      const project = get().projects.find((entry) => entry.id === id);
+      if (!project) return;
+      try {
+        const path = await invoke<string>("create_permanent_worktree", { cwd: project.path });
+        // Make the result discoverable immediately, just like Codex's
+        // permanent-worktree action: create it, then reveal it in Finder.
+        await invoke("open_in_explorer", { cwd: path, path: null });
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
+      }
+    },
+
     async setWorkspace(cwd) {
       await bridge.setWorkspace(cwd);
       const workspace = await bridge.getWorkspace();
@@ -1544,6 +1564,103 @@ export const useDesktop = create<DesktopState>((set, get) => {
         ),
         ...(get().activeId === id && archived ? { activeId: null, view: "home" as View } : {}),
       });
+    },
+
+    markSessionUnread(id) {
+      const nextIndex = get().sessionIndex.map((meta) =>
+        meta.id === id ? { ...meta, completionUnread: true } : meta,
+      );
+      setSessionFlag(id, { completionUnread: true });
+      persistSessionCatalog(nextIndex);
+      set({ sessionIndex: nextIndex });
+    },
+
+    async copySessionValue(id, value) {
+      const meta = get().sessionIndex.find((entry) => entry.id === id);
+      if (!meta) return;
+      try {
+        const text = value === "cwd"
+          ? meta.cwd
+          : value === "id"
+            ? meta.id
+            : (() => {
+                const url = new URL(window.location.href);
+                url.search = "";
+                url.hash = "";
+                url.searchParams.set("open", meta.id);
+                return url.toString();
+              })();
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
+      }
+    },
+
+    async continueSessionInNewChat(id) {
+      const meta = get().sessionIndex.find((entry) => entry.id === id);
+      if (!meta) return;
+      const session = get().sessions[id];
+      const lastUser = [...(session?.blocks ?? [])].reverse().find((block) => block.type === "user");
+      const lastAssistant = [...(session?.blocks ?? [])].reverse().find((block) => block.type === "assistant");
+      const userText = lastUser?.type === "user" ? lastUser.text : meta.title;
+      const assistantText = lastAssistant?.type === "assistant" ? lastAssistant.text.slice(-1200) : "";
+      const text = [
+        "请在新会话中继续处理下面这个任务，并保留必要的上下文。",
+        `原始请求：${userText}`,
+        assistantText ? `上一会话的最新回复：${assistantText}` : "",
+      ].filter(Boolean).join("\n\n");
+      try {
+        if (!samePath(meta.cwd, get().workspace)) await get().setWorkspace(meta.cwd);
+        await get().newSession({ text });
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
+      }
+    },
+
+    async continueSessionInNewWorktree(id) {
+      const meta = get().sessionIndex.find((entry) => entry.id === id);
+      if (!meta) return;
+      try {
+        const path = await invoke<string>("create_permanent_worktree", { cwd: meta.cwd });
+        const session = get().sessions[id];
+        const lastUser = [...(session?.blocks ?? [])].reverse().find((block) => block.type === "user");
+        const text = `请在这个新的工作树中继续处理任务：${lastUser?.type === "user" ? lastUser.text : meta.title}`;
+        await get().setWorkspace(path);
+        await get().newSession({ text });
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
+      }
+    },
+
+    async openSessionInNewWindow(id) {
+      const meta = get().sessionIndex.find((entry) => entry.id === id);
+      if (!meta) return;
+      try {
+        const url = new URL(window.location.href);
+        url.search = "";
+        url.hash = "";
+        url.searchParams.set("open", id);
+        if ("__TAURI_INTERNALS__" in window) {
+          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+          const label = `session-${id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 28)}-${Date.now()}`;
+          const child = new WebviewWindow(label, {
+            url: url.toString(),
+            title: meta.title,
+            width: 1180,
+            height: 780,
+            minWidth: 860,
+            minHeight: 560,
+            resizable: true,
+          });
+          child.once("tauri://error", (event) => {
+            set({ startupError: String(event.payload ?? "无法打开新窗口") });
+          });
+        } else {
+          window.open(url.toString(), "_blank", "noopener,noreferrer");
+        }
+      } catch (error) {
+        set({ startupError: error instanceof Error ? error.message : String(error) });
+      }
     },
 
     sendPrompt(text, attachments = [], targetSessionId, modeOverride) {

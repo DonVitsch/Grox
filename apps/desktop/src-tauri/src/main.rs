@@ -2230,6 +2230,105 @@ fn open_file_with_default(cwd: String, path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Open a workspace file with one of the explicit applications offered by
+/// the desktop selector.  Keep the allow-list here (rather than accepting an
+/// arbitrary executable from the webview) so a compromised UI cannot spawn a
+/// command of its choice.
+#[tauri::command]
+fn open_file_with_application(cwd: String, path: String, application: String) -> Result<(), String> {
+    let root = checked_workspace(&cwd)?;
+    let file = checked_workspace_file(&root, &path)?;
+    if !file.is_file() {
+        return Err("只能使用应用打开文件".into());
+    }
+    if !matches!(application.as_str(), "Cursor" | "Finder" | "Terminal" | "Ghostty" | "Xcode") {
+        return Err("不支持的打开应用".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = if application == "Finder" {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(&file)
+                .status()
+        } else {
+            std::process::Command::new("open")
+                .arg("-a")
+                .arg(&application)
+                .arg(&file)
+                .status()
+        }
+        .map_err(|error| format!("无法启动 {application}：{error}"))?;
+        if !status.success() {
+            return Err(format!("系统中未找到可用的 {application} 应用"));
+        }
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        // Named GUI applications are intentionally not guessed on Windows;
+        // the OS chooser remains available through “Open with…”.
+        let _ = application;
+        return Err("当前平台请使用“打开方式…”选择应用".into());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = application;
+        return Err("当前平台请使用系统默认应用或“打开方式…”".into());
+    }
+}
+
+/// Create a sibling Git worktree for the Codex-style “permanent worktree”
+/// actions. The target is never inside the current project, and an available
+/// suffix is chosen instead of overwriting an existing directory.
+#[tauri::command]
+fn create_permanent_worktree(cwd: String) -> Result<String, String> {
+    let root = checked_workspace(&cwd)?;
+    if !root.join(".git").exists() {
+        return Err("当前项目不是 Git 仓库，无法创建永久工作树".into());
+    }
+    let parent = root
+        .parent()
+        .ok_or_else(|| "无法确定工作树所在目录".to_string())?;
+    let base = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("grox-project");
+    let mut target = parent.join(format!("{base}-worktree"));
+    let mut suffix = 2u32;
+    while target.exists() {
+        target = parent.join(format!("{base}-worktree-{suffix}"));
+        suffix = suffix.saturating_add(1);
+        if suffix > 10_000 {
+            return Err("可用的工作树目录过多".into());
+        }
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let branch = format!("grox/worktree-{timestamp}");
+    let output = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["worktree", "add", "-b", &branch])
+        .arg(&target)
+        .output()
+        .map_err(|error| format!("无法执行 git worktree：{error}"))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            "创建永久工作树失败".into()
+        } else {
+            format!("创建永久工作树失败：{message}")
+        });
+    }
+    Ok(path_for_webview(&target))
+}
+
 /// Let the operating system present its application chooser for a workspace
 /// file.  macOS has no `open` flag for this, so use LaunchServices through a
 /// short, escaped AppleScript; Windows exposes the same chooser via
@@ -4132,7 +4231,9 @@ fn main() {
             acp_write_text_file,
             open_in_explorer,
             reveal_in_explorer,
+            create_permanent_worktree,
             open_file_with_default,
+            open_file_with_application,
             open_file_with_dialog,
             workspace_file_path,
             read_config_documents,

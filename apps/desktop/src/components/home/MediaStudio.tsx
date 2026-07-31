@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { Icon } from "../fx/Icon";
+import { openFileWithConfiguredApplication } from "../../lib/defaultOpen";
 import { useI18n } from "../../lib/i18n";
 import { useDesktop } from "../../state/store";
 
@@ -166,7 +167,7 @@ export function MediaStudio({ mode }: { mode: MediaMode }) {
                 <Icon name="file" size={12} className="text-acc" />
                 <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-fg2">{selected.path ?? selected.url}</span>
                 {selected.path && <>
-                  <button onClick={() => void runArtifactAction(() => invoke("open_file_with_default", { cwd: workspace, path: selected.path }))} className="flex h-7 items-center gap-1 rounded-[3px] px-2 text-[9px] text-dim hover:bg-high hover:text-fg2" title={zh ? "用默认应用打开" : "Open with default app"}><Icon name="external" size={10} />{zh ? "打开" : "OPEN"}</button>
+                  <button onClick={() => void runArtifactAction(() => openFileWithConfiguredApplication(workspace, selected.path!))} className="flex h-7 items-center gap-1 rounded-[3px] px-2 text-[9px] text-dim hover:bg-high hover:text-fg2" title={zh ? "用默认应用打开" : "Open with default app"}><Icon name="external" size={10} />{zh ? "打开" : "OPEN"}</button>
                   <button onClick={() => void runArtifactAction(() => invoke("open_file_with_dialog", { cwd: workspace, path: selected.path }))} className="flex h-7 items-center gap-1 rounded-[3px] px-2 text-[9px] text-dim hover:bg-high hover:text-fg2" title={zh ? "选择打开方式" : "Choose application"}><Icon name="external" size={10} />{zh ? "打开方式" : "WITH…"}</button>
                   <button onClick={() => void runArtifactAction(() => invoke("reveal_in_explorer", { cwd: workspace, path: selected.path }))} className="flex h-7 items-center gap-1 rounded-[3px] px-2 text-[9px] text-dim hover:bg-high hover:text-fg2" title={zh ? "在 Finder 中显示" : "Reveal in file manager"}><Icon name="folder" size={10} /></button>
                 </>}
