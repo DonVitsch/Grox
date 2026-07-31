@@ -176,7 +176,16 @@ function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
     <div ref={ref} className="relative">
       <button
         className={`chip gap-1 ${open ? "!border-line3 !text-fg2" : ""}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (next) {
+            void refreshOpenApplications().then((items) => {
+              setApplications(items);
+              setApplication(getDefaultOpenApplication());
+            });
+          }
+        }}
         title={zh ? "选择文件的默认打开方式" : "Choose the default application for files"}
         aria-haspopup="menu"
         aria-expanded={open}

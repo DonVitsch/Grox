@@ -2,13 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 /**
  * An application discovered from the host's installed application registry.
- * The stable id is persisted; the native bundle path is used only when
- * launching the selected app.
+ * The stable id is persisted; the native launch target is used only when
+ * launching the selected app. On macOS this is an .app bundle, on Windows
+ * an executable, and on Linux a validated .desktop entry.
  */
 export interface OpenApplicationOption {
   id: string;
   name: string;
-  bundlePath?: string;
+  launchTarget?: string;
   iconDataUrl?: string;
   isDefault?: boolean;
 }
@@ -36,24 +37,33 @@ function normalizeApplications(value: unknown): OpenApplicationOption[] {
     result.push({
       id,
       name,
-      ...(typeof candidate.bundlePath === "string" ? { bundlePath: candidate.bundlePath } : {}),
+      ...(typeof candidate.launchTarget === "string"
+        ? { launchTarget: candidate.launchTarget }
+        : typeof candidate.bundlePath === "string"
+          ? { launchTarget: candidate.bundlePath } // migrate the short-lived macOS-only key
+          : {}),
       ...(typeof candidate.iconDataUrl === "string" ? { iconDataUrl: candidate.iconDataUrl } : {}),
     });
   }
   return result;
 }
 
-function readSavedApplication(): { id?: string; name?: string; bundlePath?: string } | null {
+function readSavedApplication(): { id?: string; name?: string; launchTarget?: string } | null {
   const raw = localStorage.getItem(DEFAULT_OPEN_APPLICATION_KEY);
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "string") return { name: parsed };
     if (parsed && typeof parsed === "object") {
       const value = parsed as Record<string, unknown>;
       return {
         ...(typeof value.id === "string" ? { id: value.id } : {}),
         ...(typeof value.name === "string" ? { name: value.name } : {}),
-        ...(typeof value.bundlePath === "string" ? { bundlePath: value.bundlePath } : {}),
+        ...(typeof value.launchTarget === "string"
+          ? { launchTarget: value.launchTarget }
+          : typeof value.bundlePath === "string"
+            ? { launchTarget: value.bundlePath }
+            : {}),
       };
     }
   } catch {
@@ -63,11 +73,11 @@ function readSavedApplication(): { id?: string; name?: string; bundlePath?: stri
   return null;
 }
 
-function resolveApplication(saved: { id?: string; name?: string; bundlePath?: string } | null): OpenApplicationOption {
+function resolveApplication(saved: { id?: string; name?: string; launchTarget?: string } | null): OpenApplicationOption {
   if (!saved) return DEFAULT_OPEN_APPLICATION;
   const match = availableApplications.find((item) =>
     (saved.id && item.id === saved.id)
-    || (saved.bundlePath && item.bundlePath === saved.bundlePath)
+    || (saved.launchTarget && item.launchTarget === saved.launchTarget)
     || (saved.name && item.name === saved.name)
     || (saved.name === "default" && item.isDefault),
   );
@@ -88,7 +98,8 @@ export async function refreshOpenApplications(): Promise<OpenApplicationOption[]
     const discovered = await invoke<unknown[]>("list_open_applications");
     availableApplications = normalizeApplications(discovered);
   } catch {
-    // Browser preview and non-macOS builds still have a usable system default.
+    // Browser preview or a host without an application registry still has a
+    // usable system default.
     availableApplications = [DEFAULT_OPEN_APPLICATION];
   }
   window.dispatchEvent(new CustomEvent("grox:open-applications", { detail: availableApplications }));
@@ -99,7 +110,7 @@ export function setDefaultOpenApplication(application: OpenApplicationOption): v
   localStorage.setItem(DEFAULT_OPEN_APPLICATION_KEY, JSON.stringify({
     id: application.id,
     name: application.name,
-    ...(application.bundlePath ? { bundlePath: application.bundlePath } : {}),
+    ...(application.launchTarget ? { launchTarget: application.launchTarget } : {}),
   }));
   window.dispatchEvent(new CustomEvent("grox:default-open-application", { detail: application }));
 }
@@ -107,13 +118,13 @@ export function setDefaultOpenApplication(application: OpenApplicationOption): v
 /** Open a workspace file with the selected application. */
 export async function openFileWithConfiguredApplication(cwd: string, path: string): Promise<void> {
   const application = getDefaultOpenApplication();
-  if (application.isDefault || !application.bundlePath) {
+  if (application.isDefault || !application.launchTarget) {
     await invoke("open_file_with_default", { cwd, path });
     return;
   }
   await invoke("open_file_with_application", {
     cwd,
     path,
-    application: application.bundlePath,
+    application: application.launchTarget,
   });
 }

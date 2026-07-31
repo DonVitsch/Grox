@@ -221,13 +221,13 @@ struct MediaGenerationResult {
     summary: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenApplicationOption {
     id: String,
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bundle_path: Option<String>,
+    launch_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     icon_data_url: Option<String>,
 }
@@ -2255,11 +2255,24 @@ fn application_search_roots() -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn discovered_application_paths() -> Vec<PathBuf> {
+    fn collect_bundles(root: &Path, depth: u8, paths: &mut BTreeSet<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else { return };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|value| value == "app") && path.is_dir() {
+                paths.insert(path);
+            } else if depth > 0 && path.is_dir() {
+                collect_bundles(&path, depth - 1, paths);
+            }
+        }
+    }
+
     let mut paths = BTreeSet::new();
     for root in application_search_roots() {
         if !root.is_dir() {
             continue;
         }
+        let paths_before_root = paths.len();
         let root_string = root.to_string_lossy().to_string();
         if let Ok(output) = std::process::Command::new("/usr/bin/mdfind")
             .args([
@@ -2277,6 +2290,13 @@ fn discovered_application_paths() -> Vec<PathBuf> {
                 }
             }
         }
+        // Spotlight is normally instant, but a fresh install or a disabled
+        // index must not make the selector silently empty. A shallow fallback
+        // covers normal top-level and vendor-nested .app bundles without
+        // walking an entire home directory.
+        if paths.len() == paths_before_root {
+            collect_bundles(&root, 2, &mut paths);
+        }
     }
     for path in [
         "/System/Library/CoreServices/Finder.app",
@@ -2293,54 +2313,6 @@ fn discovered_application_paths() -> Vec<PathBuf> {
 #[cfg(target_os = "macos")]
 fn plist_string(plist: &serde_json::Value, key: &str) -> Option<String> {
     plist.get(key).and_then(|value| value.as_str()).map(str::to_string)
-}
-
-#[cfg(target_os = "macos")]
-fn app_declares_text_documents(plist: &serde_json::Value) -> bool {
-    let Some(entries) = plist.get("CFBundleDocumentTypes").and_then(|value| value.as_array()) else {
-        return false;
-    };
-    entries.iter().any(|entry| {
-        let Some(entry) = entry.as_object() else {
-            return false;
-        };
-        let role = entry
-            .get("CFBundleTypeRole")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if role != "editor" {
-            return false;
-        }
-        entry
-            .get("CFBundleTypeExtensions")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.as_str())
-            .map(|value| value.to_ascii_lowercase())
-            .any(|extension| {
-                matches!(
-                    extension.as_str(),
-                    "json"
-                        | "js"
-                        | "jsx"
-                        | "ts"
-                        | "tsx"
-                        | "rs"
-                        | "py"
-                        | "go"
-                        | "java"
-                        | "c"
-                        | "h"
-                        | "cpp"
-                        | "swift"
-                        | "toml"
-                        | "yaml"
-                        | "yml"
-                )
-            })
-    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2455,27 +2427,436 @@ fn inspect_application(path: &Path) -> Option<OpenApplicationOption> {
         "rustrover",
         "fleet",
         "coteditor",
-        "typora",
-        "mark text",
-        "obsidian",
-        "ulysses",
-        "ia writer",
-        "quiver",
-        "textedit",
         "emacs",
         "vim",
     ]
     .iter()
     .any(|hint| lower.contains(hint));
-    if !is_finder && !is_terminal && !is_editor && !app_declares_text_documents(&plist) {
+    if !is_finder && !is_terminal && !is_editor {
         return None;
     }
     Some(OpenApplicationOption {
         id: bundle_id,
         name,
-        bundle_path: Some(path_for_webview(path)),
+        launch_target: Some(path_for_webview(path)),
         icon_data_url: app_icon_data_url(path, &plist),
     })
+}
+
+#[cfg(windows)]
+fn windows_application_discovery_script() -> &'static str {
+    // Keep discovery in the OS registry instead of shipping a fixed list.
+    // The same registration is what Windows shows in its own “Open with” UI.
+    r#"
+$ErrorActionPreference = 'SilentlyContinue'
+try { Add-Type -AssemblyName System.Drawing } catch {}
+
+function Resolve-Executable([string]$command) {
+  if ([string]::IsNullOrWhiteSpace($command)) { return $null }
+  $match = [regex]::Match($command, '^\s*"([^"]+)"|^\s*([^\s]+)')
+  if (-not $match.Success) { return $null }
+  $candidate = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+  if ($candidate -match '%') { return $null }
+  try { return (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path } catch {}
+  try { return (Get-Command $candidate -ErrorAction Stop).Source } catch { return $null }
+}
+
+function Icon-Data([string]$path) {
+  try {
+    if (-not ('System.Drawing.Icon' -as [type])) { return $null }
+    $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($path)
+    if ($null -eq $icon) { return $null }
+    $bitmap = $icon.ToBitmap()
+    $stream = New-Object System.IO.MemoryStream
+    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    $value = [Convert]::ToBase64String($stream.ToArray())
+    $bitmap.Dispose(); $icon.Dispose(); $stream.Dispose()
+    return "data:image/png;base64,$value"
+  } catch { return $null }
+}
+
+$apps = @{}
+function Add-App([string]$id, [string]$name, [string]$target) {
+  if ([string]::IsNullOrWhiteSpace($target) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { return }
+  $resolved = (Resolve-Path -LiteralPath $target).Path
+  $extension = [IO.Path]::GetExtension($resolved).ToLowerInvariant()
+  if ($extension -notin @('.exe','.com','.bat','.cmd','.ps1')) { return }
+  if ($apps.ContainsKey($resolved.ToLowerInvariant())) { return }
+  $description = $null
+  try { $description = (Get-Item $resolved).VersionInfo.FileDescription } catch {}
+  if ([string]::IsNullOrWhiteSpace($description)) { $description = [IO.Path]::GetFileNameWithoutExtension($resolved) }
+  $apps[$resolved.ToLowerInvariant()] = [ordered]@{
+    id = if ([string]::IsNullOrWhiteSpace($id)) { "windows:$resolved" } else { "windows:$id" }
+    name = $description
+    launchTarget = $resolved
+    iconDataUrl = (Icon-Data $resolved)
+  }
+}
+
+$hints = '(?i)(cursor|visual studio|vs code|code\.exe|xcode|zed|sublime|textmate|notepad\+\+|notepad|vim|neovim|emacs|idea|pycharm|webstorm|goland|clion|rustrover|fleet|terminal|powershell|alacritty|wezterm|kitty|ghostty|warp|conemu|mintty)'
+$sourceExtensions = '(?i)\.(txt|md|markdown|json|jsonl|js|jsx|ts|tsx|rs|py|go|java|c|h|cpp|hpp|swift|toml|yaml|yml|xml|css|html|htm)$'
+$registryRoots = @(
+  'Registry::HKEY_CLASSES_ROOT\Applications',
+  'Registry::HKEY_CURRENT_USER\Software\Classes\Applications',
+  'Registry::HKEY_LOCAL_MACHINE\Software\Classes\Applications'
+)
+foreach ($registryRoot in $registryRoots) {
+  foreach ($app in @(Get-ChildItem -LiteralPath $registryRoot)) {
+    $commandKey = Join-Path $app.PSPath 'shell\open\command'
+    $commandItem = Get-Item -LiteralPath $commandKey
+    if ($null -eq $commandItem) { continue }
+    $target = Resolve-Executable ([string]$commandItem.GetValue(''))
+    if ($null -eq $target) { continue }
+    $descriptor = "$($app.PSChildName) $target"
+    $sourceAssociation = $false
+    $associationKey = Get-Item -LiteralPath (Join-Path $app.PSPath 'Capabilities\FileAssociations')
+    if ($null -ne $associationKey) {
+      $sourceAssociation = @($associationKey.GetValueNames()) -match $sourceExtensions
+    }
+    if ($descriptor -match $hints -or $sourceAssociation) {
+      Add-App $app.PSChildName $app.PSChildName $target
+    }
+  }
+}
+
+# File Explorer and installed terminal shells are OS applications, not always
+# present below HKCR\Applications. Add them only when the command actually
+# exists on this machine.
+foreach ($entry in @(
+  @{ id = 'file-explorer'; name = 'File Explorer'; command = 'explorer.exe' },
+  @{ id = 'windows-terminal'; name = 'Windows Terminal'; command = 'wt.exe' },
+  @{ id = 'powershell'; name = 'PowerShell'; command = 'powershell.exe' }
+)) {
+  $command = Get-Command $entry.command
+  if ($null -ne $command) { Add-App $entry.id $entry.name $command.Source }
+}
+$apps.Values | Sort-Object name | ConvertTo-Json -Compress
+"#
+}
+
+#[cfg(windows)]
+fn list_windows_open_applications() -> Result<Vec<OpenApplicationOption>, String> {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            windows_application_discovery_script(),
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("无法读取 Windows 应用注册表：{error}"))?;
+    if !output.status.success() {
+        return Err("Windows 应用注册表查询失败".into());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    let values = match value {
+        serde_json::Value::Array(values) => values,
+        serde_json::Value::Object(_) => vec![value],
+        _ => Vec::new(),
+    };
+    let mut applications = values
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<OpenApplicationOption>(value).ok())
+        .filter(|item| item.launch_target.as_deref().is_some_and(|target| Path::new(target).is_absolute()))
+        .collect::<Vec<_>>();
+    applications.sort_by_cached_key(|item| item.name.to_ascii_lowercase());
+    let mut seen = BTreeSet::new();
+    applications.retain(|item| seen.insert(item.id.clone()));
+    Ok(applications)
+}
+
+#[cfg(windows)]
+fn checked_windows_application(requested: &str) -> Result<PathBuf, String> {
+    let path = Path::new(requested);
+    if !path.is_absolute() {
+        return Err("打开应用必须是 Windows 的绝对路径".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("无法解析打开应用：{error}"))?;
+    if !canonical.is_file() {
+        return Err("打开应用必须是可执行文件".into());
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "exe" | "com" | "bat" | "cmd" | "ps1") {
+        return Err("打开应用必须是 Windows 可执行文件".into());
+    }
+    let discovered = list_windows_open_applications()?;
+    if !discovered.iter().any(|item| {
+        item.launch_target
+            .as_deref()
+            .and_then(|target| Path::new(target).canonicalize().ok())
+            .is_some_and(|target| target == canonical)
+    }) {
+        return Err("打开应用不是 Windows 已发现的可用应用".into());
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_application_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(home).join(".local").join("share"));
+        roots.push(data_home.join("applications"));
+    }
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    for directory in data_dirs.split(':').filter(|value| !value.is_empty()) {
+        roots.push(PathBuf::from(directory).join("applications"));
+    }
+    roots
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_entry_fields(content: &str) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let mut in_desktop_entry = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            fields.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    fields
+}
+
+#[cfg(target_os = "linux")]
+fn split_desktop_exec(value: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+        if character == '\'' || character == '"' {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !current.is_empty() {
+                args.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    (!args.is_empty()).then_some(args)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_icon_file(name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let direct = PathBuf::from(name);
+    if direct.is_absolute() && direct.is_file() {
+        return Some(direct);
+    }
+    let mut roots = linux_application_dirs()
+        .into_iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    roots.extend([
+        PathBuf::from("/usr/share/pixmaps"),
+        PathBuf::from("/usr/local/share/pixmaps"),
+    ]);
+    let names = if Path::new(name).extension().is_some() {
+        vec![name.to_string()]
+    } else {
+        ["png", "svg", "jpg", "jpeg"]
+            .into_iter()
+            .map(|extension| format!("{name}.{extension}"))
+            .collect()
+    };
+    for root in roots {
+        for candidate_name in &names {
+            let direct_candidate = root.join("pixmaps").join(candidate_name);
+            if direct_candidate.is_file() {
+                return Some(direct_candidate);
+            }
+            for theme in ["hicolor", "Adwaita", "breeze", "default"] {
+                for size in ["scalable/apps", "64x64/apps", "48x48/apps", "32x32/apps"] {
+                    let candidate = root.join("icons").join(theme).join(size).join(candidate_name);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_icon_data_url(name: Option<&str>) -> Option<String> {
+    let path = linux_icon_file(name?)?;
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => return None,
+    };
+    Some(format!("data:{mime};base64,{}", BASE64.encode(fs::read(path).ok()?)))
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_desktop_application(path: &Path) -> Option<OpenApplicationOption> {
+    let content = read_bounded_text(path, 1024 * 1024).ok()?;
+    let fields = desktop_entry_fields(&content);
+    if fields.get("Type").map(String::as_str) != Some("Application")
+        || fields.get("NoDisplay").is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        || fields.get("Hidden").is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    {
+        return None;
+    }
+    let name = fields.get("Name")?.trim();
+    let exec = fields.get("Exec")?;
+    let lower = format!("{} {} {}", name, exec, fields.get("Categories").map(String::as_str).unwrap_or_default()).to_ascii_lowercase();
+    let terminal = lower.contains("terminal")
+        || lower.contains("ghostty")
+        || lower.contains("alacritty")
+        || lower.contains("wezterm")
+        || lower.contains("kitty")
+        || lower.contains("terminalemulator");
+    let editor = lower.contains("development")
+        || lower.contains("ide")
+        || lower.contains("editor")
+        || lower.contains("cursor")
+        || lower.contains("code")
+        || lower.contains("vim")
+        || lower.contains("emacs")
+        || lower.contains("sublime")
+        || lower.contains("notepad")
+        || lower.contains("textmate");
+    let file_manager = lower.contains("filemanager")
+        || lower.contains("file manager")
+        || lower.contains("nautilus")
+        || lower.contains("dolphin")
+        || lower.contains("thunar")
+        || lower.contains("pcmanfm");
+    let source_mime = fields
+        .get("MimeType")
+        .map(|value| value.split(';').any(|mime| mime.starts_with("text/x-") || mime.contains("javascript") || mime.contains("json")))
+        .unwrap_or(false);
+    if !terminal && !editor && !file_manager && !source_mime {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    Some(OpenApplicationOption {
+        id: format!("linux:{}", canonical.to_string_lossy()),
+        name: name.to_string(),
+        launch_target: Some(path_for_webview(&canonical)),
+        icon_data_url: linux_icon_data_url(fields.get("Icon").map(String::as_str)),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn list_linux_open_applications() -> Vec<OpenApplicationOption> {
+    let mut applications = Vec::new();
+    for root in linux_application_dirs() {
+        let Ok(entries) = fs::read_dir(root) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("desktop") {
+                if let Some(application) = inspect_desktop_application(&path) {
+                    applications.push(application);
+                }
+            }
+        }
+    }
+    applications.sort_by_cached_key(|item| item.name.to_ascii_lowercase());
+    let mut seen = BTreeSet::new();
+    applications.retain(|item| seen.insert(item.id.clone()));
+    applications
+}
+
+#[cfg(target_os = "linux")]
+fn checked_desktop_application(requested: &str) -> Result<PathBuf, String> {
+    let path = Path::new(requested);
+    if !path.is_absolute() || path.extension().and_then(|value| value.to_str()) != Some("desktop") {
+        return Err("打开应用必须是 Linux 的 .desktop 文件".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("无法解析打开应用：{error}"))?;
+    if !linux_application_dirs().into_iter().any(|root| canonical.starts_with(root)) {
+        return Err("打开应用必须来自系统应用目录".into());
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_command_for_file(path: &Path, file: &Path) -> Result<(String, Vec<String>), String> {
+    let fields = desktop_entry_fields(&read_bounded_text(path, 1024 * 1024)?);
+    let exec = fields.get("Exec").ok_or_else(|| "Linux 应用缺少 Exec 配置".to_string())?;
+    let raw_args = split_desktop_exec(exec).ok_or_else(|| "无法解析 Linux 应用的 Exec 配置".to_string())?;
+    let mut args = Vec::new();
+    let mut inserted_file = false;
+    for argument in raw_args {
+        if matches!(argument.as_str(), "%f" | "%F" | "%u" | "%U") {
+            args.push(path_for_webview(file));
+            inserted_file = true;
+        } else if matches!(argument.as_str(), "%i" | "%c" | "%k" | "%d" | "%D" | "%n" | "%N" | "%v" | "%m") {
+            continue;
+        } else if argument.contains('%') {
+            args.push(argument.replace("%f", &path_for_webview(file)).replace("%u", &path_for_webview(file)));
+            inserted_file = true;
+        } else {
+            args.push(argument);
+        }
+    }
+    let command = args.first().cloned().ok_or_else(|| "Linux 应用的 Exec 配置为空".to_string())?;
+    let mut command_args = args.into_iter().skip(1).collect::<Vec<_>>();
+    if !inserted_file {
+        command_args.push(path_for_webview(file));
+    }
+    Ok((command, command_args))
 }
 
 /// Enumerate installed editor and terminal applications on the host.
@@ -2492,7 +2873,15 @@ fn list_open_applications() -> Result<Vec<OpenApplicationOption>, String> {
         applications.retain(|item| seen.insert(item.id.clone()));
         return Ok(applications);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        return list_windows_open_applications();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(list_linux_open_applications());
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows), not(target_os = "linux")))]
     {
         Ok(Vec::new())
     }
@@ -2528,8 +2917,8 @@ fn checked_application_bundle(requested: &str) -> Result<Option<PathBuf>, String
 }
 
 /// Open a workspace file with one application discovered by the desktop
-/// selector. Dynamic bundle paths are accepted only from trusted macOS app
-/// directories, so the webview cannot turn this into arbitrary process spawn.
+/// selector. The launch target is validated again in the native process;
+/// localStorage is not treated as an authority boundary.
 #[tauri::command]
 fn open_file_with_application(cwd: String, path: String, application: String) -> Result<(), String> {
     let root = checked_workspace(&cwd)?;
@@ -2566,13 +2955,45 @@ fn open_file_with_application(cwd: String, path: String, application: String) ->
 
     #[cfg(windows)]
     {
-        // Named GUI applications are intentionally not guessed on Windows;
-        // the OS chooser remains available through “Open with…”.
-        let _ = application;
-        return Err("当前平台请使用“打开方式…”选择应用".into());
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let target = checked_windows_application(&application)?;
+        let extension = target
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut command = if matches!(extension.as_str(), "bat" | "cmd") {
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/D", "/C"]).arg(&target);
+            command
+        } else if extension == "ps1" {
+            let mut command = std::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-File"]).arg(&target);
+            command
+        } else {
+            std::process::Command::new(&target)
+        };
+        command
+            .arg(&file)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("无法启动 {}：{error}", target.display()))?;
+        return Ok(());
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let target = checked_desktop_application(&application)?;
+        let (command_name, args) = desktop_command_for_file(&target, &file)?;
+        std::process::Command::new(&command_name)
+            .args(args)
+            .spawn()
+            .map_err(|error| format!("无法启动 {}：{error}", target.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
     {
         let _ = application;
         return Err("当前平台请使用系统默认应用或“打开方式…”".into());
@@ -4605,7 +5026,7 @@ mod tests {
             !item.id.trim().is_empty()
                 && !item.name.trim().is_empty()
                 && item
-                    .bundle_path
+                    .launch_target
                     .as_deref()
                     .map_or(true, |path| Path::new(path).is_absolute())
         }));
