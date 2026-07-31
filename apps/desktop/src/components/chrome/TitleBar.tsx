@@ -10,10 +10,11 @@ import { Icon } from "../fx/Icon";
 import { useI18n } from "../../lib/i18n";
 import { EnvironmentSummary } from "./EnvironmentSummary";
 import {
+  getAvailableOpenApplications,
   getDefaultOpenApplication,
-  OPEN_APPLICATIONS,
+  refreshOpenApplications,
   setDefaultOpenApplication,
-  type OpenApplication,
+  type OpenApplicationOption,
 } from "../../lib/defaultOpen";
 
 const inTauri = () => "__TAURI_INTERNALS__" in window;
@@ -119,38 +120,57 @@ export function TitleBar() {
 
 function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
   const [open, setOpen] = useState(false);
-  const [application, setApplication] = useState<OpenApplication>(() => getDefaultOpenApplication());
+  const [applications, setApplications] = useState<OpenApplicationOption[]>(() => getAvailableOpenApplications());
+  const [application, setApplication] = useState<OpenApplicationOption>(() => getDefaultOpenApplication());
   const ref = useRef<HTMLDivElement>(null);
   const zh = language === "zh-CN";
 
   useEffect(() => {
+    let alive = true;
+    const syncApplications = (event: Event) => {
+      const value = (event as CustomEvent<OpenApplicationOption[]>).detail;
+      if (Array.isArray(value)) setApplications(value);
+    };
     const sync = (event: Event) => {
-      const value = (event as CustomEvent<OpenApplication>).detail;
-      if (OPEN_APPLICATIONS.includes(value)) setApplication(value);
+      const value = (event as CustomEvent<OpenApplicationOption>).detail;
+      if (value?.id) setApplication(value);
     };
     const close = (event: PointerEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
     };
     const escape = (event: KeyboardEvent) => event.key === "Escape" && setOpen(false);
+    window.addEventListener("grox:open-applications", syncApplications);
     window.addEventListener("grox:default-open-application", sync);
     document.addEventListener("pointerdown", close, true);
     document.addEventListener("keydown", escape);
+    void refreshOpenApplications().then((next) => {
+      if (!alive) return;
+      setApplications(next);
+      setApplication(getDefaultOpenApplication());
+    });
     return () => {
+      alive = false;
+      window.removeEventListener("grox:open-applications", syncApplications);
       window.removeEventListener("grox:default-open-application", sync);
       document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", escape);
     };
   }, []);
 
-  const label = (value: OpenApplication) => value === "default"
+  const label = (value: OpenApplicationOption) => value.isDefault
     ? (zh ? "系统默认" : "System default")
-    : value;
-  const icon = (value: OpenApplication): React.ComponentProps<typeof Icon>["name"] => {
-    if (value === "Finder") return "folder";
-    if (value === "Terminal" || value === "Ghostty") return "terminal";
-    if (value === "Cursor" || value === "Xcode") return "edit";
+    : value.name;
+  const fallbackIcon = (value: OpenApplicationOption): React.ComponentProps<typeof Icon>["name"] => {
+    const name = value.name.toLowerCase();
+    if (name.includes("finder")) return "folder";
+    if (name.includes("terminal") || name.includes("ghostty") || name.includes("shell")) return "terminal";
     return "external";
   };
+
+  const current = applications.find((item) => item.id === application.id) ?? application;
+  const appIcon = (value: OpenApplicationOption, size: number) => value.iconDataUrl
+    ? <img src={value.iconDataUrl} alt="" width={size} height={size} className="shrink-0 rounded-[3px] object-contain" />
+    : <Icon name={fallbackIcon(value)} size={size} className="shrink-0" />;
 
   return (
     <div ref={ref} className="relative">
@@ -161,28 +181,28 @@ function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <Icon name={icon(application)} size={11} />
+        {appIcon(current, 13)}
         <span>{zh ? "打开方式" : "OPEN WITH"}</span>
         <Icon name="chevronDown" size={9} className="text-faint" />
       </button>
       {open && (
         <div className="absolute right-0 top-9 z-[60] w-52 overflow-hidden rounded-[7px] border border-line3 bg-raise p-1.5 shadow-2xl" role="menu">
           <p className="px-2 pb-1.5 pt-1 font-mono text-[8.5px] tracking-[0.12em] text-faint">{zh ? "文件默认打开应用" : "DEFAULT FILE APPLICATION"}</p>
-          {OPEN_APPLICATIONS.map((item) => (
+          {applications.map((item) => (
             <button
-              key={item}
+              key={item.id}
               role="menuitemradio"
-              aria-checked={application === item}
+              aria-checked={application.id === item.id}
               onClick={() => {
                 setDefaultOpenApplication(item);
                 setApplication(item);
                 setOpen(false);
               }}
-              className={`flex h-8 w-full items-center gap-2 rounded-[4px] px-2 text-left text-[10.5px] transition-colors ${application === item ? "bg-acc-wash text-fg" : "text-mute hover:bg-high hover:text-fg2"}`}
+              className={`flex h-8 w-full items-center gap-2 rounded-[4px] px-2 text-left text-[10.5px] transition-colors ${application.id === item.id ? "bg-acc-wash text-fg" : "text-mute hover:bg-high hover:text-fg2"}`}
             >
-              <Icon name={icon(item)} size={12} className={application === item ? "text-acc" : "text-dim"} />
+              <span className={application.id === item.id ? "text-acc" : "text-dim"}>{appIcon(item, 15)}</span>
               <span className="flex-1">{label(item)}</span>
-              {application === item && <Icon name="check" size={10} className="text-acc" />}
+              {application.id === item.id && <Icon name="check" size={10} className="text-acc" />}
             </button>
           ))}
         </div>

@@ -9,7 +9,7 @@
 mod computer_mcp;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write as _,
     path::{Component, Path, PathBuf},
@@ -219,6 +219,17 @@ struct MediaArtifact {
 struct MediaGenerationResult {
     artifacts: Vec<MediaArtifact>,
     summary: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenApplicationOption {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_data_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2230,10 +2241,295 @@ fn open_file_with_default(cwd: String, path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Open a workspace file with one of the explicit applications offered by
-/// the desktop selector.  Keep the allow-list here (rather than accepting an
-/// arbitrary executable from the webview) so a compromised UI cannot spawn a
-/// command of its choice.
+#[cfg(target_os = "macos")]
+fn application_search_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+    ];
+    if let Ok(home) = user_home() {
+        roots.push(home.join("Applications"));
+    }
+    roots
+}
+
+#[cfg(target_os = "macos")]
+fn discovered_application_paths() -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for root in application_search_roots() {
+        if !root.is_dir() {
+            continue;
+        }
+        let root_string = root.to_string_lossy().to_string();
+        if let Ok(output) = std::process::Command::new("/usr/bin/mdfind")
+            .args([
+                "-onlyin",
+                root_string.as_str(),
+                "kMDItemContentType == 'com.apple.application-bundle'",
+            ])
+            .stderr(Stdio::null())
+            .output()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let path = PathBuf::from(line.trim());
+                if path.extension().is_some_and(|value| value == "app") {
+                    paths.insert(path);
+                }
+            }
+        }
+    }
+    for path in [
+        "/System/Library/CoreServices/Finder.app",
+        "/System/Applications/Utilities/Terminal.app",
+    ] {
+        let path = PathBuf::from(path);
+        if path.is_dir() {
+            paths.insert(path);
+        }
+    }
+    paths.into_iter().collect()
+}
+
+#[cfg(target_os = "macos")]
+fn plist_string(plist: &serde_json::Value, key: &str) -> Option<String> {
+    plist.get(key).and_then(|value| value.as_str()).map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+fn app_declares_text_documents(plist: &serde_json::Value) -> bool {
+    let Some(entries) = plist.get("CFBundleDocumentTypes").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        let Some(entry) = entry.as_object() else {
+            return false;
+        };
+        let role = entry
+            .get("CFBundleTypeRole")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if role != "editor" {
+            return false;
+        }
+        entry
+            .get("CFBundleTypeExtensions")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+            .map(|value| value.to_ascii_lowercase())
+            .any(|extension| {
+                matches!(
+                    extension.as_str(),
+                    "json"
+                        | "js"
+                        | "jsx"
+                        | "ts"
+                        | "tsx"
+                        | "rs"
+                        | "py"
+                        | "go"
+                        | "java"
+                        | "c"
+                        | "h"
+                        | "cpp"
+                        | "swift"
+                        | "toml"
+                        | "yaml"
+                        | "yml"
+                )
+            })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn app_icon_resource(app_path: &Path, plist: &serde_json::Value) -> Option<PathBuf> {
+    let resources = app_path
+        .join("Contents")
+        .join("Resources")
+        .canonicalize()
+        .ok()?;
+    let configured = plist_string(plist, "CFBundleIconFile")
+        .or_else(|| plist_string(plist, "CFBundleIconName"));
+    if let Some(configured) = configured {
+        let configured = PathBuf::from(configured);
+        let candidate = resources.join(&configured).canonicalize().ok();
+        if let Some(candidate) = candidate.filter(|path| path.starts_with(&resources) && path.is_file()) {
+            return Some(candidate);
+        }
+        if configured.extension().is_none() {
+            let candidate = resources
+                .join(configured)
+                .with_extension("icns")
+                .canonicalize()
+                .ok();
+            if let Some(candidate) = candidate.filter(|path| path.starts_with(&resources) && path.is_file()) {
+                return Some(candidate);
+            }
+        }
+    }
+    fs::read_dir(resources)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file()
+                && path.extension().is_some_and(|extension| {
+                    matches!(extension.to_ascii_lowercase().to_str(), Some("icns") | Some("png"))
+                })
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn app_icon_data_url(app_path: &Path, plist: &serde_json::Value) -> Option<String> {
+    let source = app_icon_resource(app_path, plist)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let target = std::env::temp_dir().join(format!("grox-app-icon-{nonce}.png"));
+    let status = std::process::Command::new("/usr/bin/sips")
+        .args(["-s", "format", "png", "-z", "32", "32"])
+        .arg(&source)
+        .arg("--out")
+        .arg(&target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = fs::remove_file(&target);
+        return None;
+    }
+    let bytes = fs::read(&target).ok();
+    let _ = fs::remove_file(&target);
+    bytes.map(|bytes| format!("data:image/png;base64,{}", BASE64.encode(bytes)))
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_application(path: &Path) -> Option<OpenApplicationOption> {
+    let plist_path = path.join("Contents").join("Info.plist");
+    let output = std::process::Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(&plist_path)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let plist = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    let bundle_id = plist_string(&plist, "CFBundleIdentifier")?;
+    let name = plist_string(&plist, "CFBundleDisplayName")
+        .or_else(|| plist_string(&plist, "CFBundleName"))
+        .or_else(|| path.file_stem().and_then(|value| value.to_str()).map(str::to_string))?;
+    let lower = format!("{} {}", bundle_id, name).to_ascii_lowercase();
+    let is_finder = bundle_id == "com.apple.finder" || lower.contains("finder");
+    let is_terminal = [
+        "terminal",
+        "ghostty",
+        "iterm",
+        "warp",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "hyper",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint));
+    let is_editor = [
+        "cursor",
+        "visual studio",
+        "xcode",
+        "zed",
+        "sublime",
+        "textmate",
+        "bbedit",
+        "nova",
+        "intellij",
+        "pycharm",
+        "webstorm",
+        "goland",
+        "clion",
+        "rustrover",
+        "fleet",
+        "coteditor",
+        "typora",
+        "mark text",
+        "obsidian",
+        "ulysses",
+        "ia writer",
+        "quiver",
+        "textedit",
+        "emacs",
+        "vim",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint));
+    if !is_finder && !is_terminal && !is_editor && !app_declares_text_documents(&plist) {
+        return None;
+    }
+    Some(OpenApplicationOption {
+        id: bundle_id,
+        name,
+        bundle_path: Some(path_for_webview(path)),
+        icon_data_url: app_icon_data_url(path, &plist),
+    })
+}
+
+/// Enumerate installed editor and terminal applications on the host.
+#[tauri::command]
+fn list_open_applications() -> Result<Vec<OpenApplicationOption>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut applications = discovered_application_paths()
+            .iter()
+            .filter_map(|path| inspect_application(path))
+            .collect::<Vec<_>>();
+        applications.sort_by_cached_key(|item| item.name.to_ascii_lowercase());
+        let mut seen = BTreeSet::new();
+        applications.retain(|item| seen.insert(item.id.clone()));
+        return Ok(applications);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn checked_application_bundle(requested: &str) -> Result<Option<PathBuf>, String> {
+    let path = Path::new(requested);
+    if !path.is_absolute() {
+        if matches!(requested, "Cursor" | "Finder" | "Terminal" | "Ghostty" | "Xcode") {
+            return Ok(None);
+        }
+        return Err("不支持的打开应用".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("无法解析打开应用：{error}"))?;
+    if !canonical.is_dir() || canonical.extension().map_or(true, |value| value != "app") {
+        return Err("打开应用必须是 macOS .app".into());
+    }
+    let mut allowed_roots = application_search_roots();
+    allowed_roots.extend([
+        PathBuf::from("/System/Library/CoreServices"),
+        PathBuf::from("/Library/CoreServices"),
+    ]);
+    if !allowed_roots
+        .iter()
+        .any(|root| canonical.starts_with(root))
+    {
+        return Err("打开应用必须来自系统应用目录".into());
+    }
+    Ok(Some(canonical))
+}
+
+/// Open a workspace file with one application discovered by the desktop
+/// selector. Dynamic bundle paths are accepted only from trusted macOS app
+/// directories, so the webview cannot turn this into arbitrary process spawn.
 #[tauri::command]
 fn open_file_with_application(cwd: String, path: String, application: String) -> Result<(), String> {
     let root = checked_workspace(&cwd)?;
@@ -2241,13 +2537,15 @@ fn open_file_with_application(cwd: String, path: String, application: String) ->
     if !file.is_file() {
         return Err("只能使用应用打开文件".into());
     }
-    if !matches!(application.as_str(), "Cursor" | "Finder" | "Terminal" | "Ghostty" | "Xcode") {
-        return Err("不支持的打开应用".into());
-    }
-
     #[cfg(target_os = "macos")]
     {
-        let status = if application == "Finder" {
+        let application_path = checked_application_bundle(&application)?;
+        let application_name = application_path
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .and_then(|value| value.to_str())
+            .unwrap_or(&application);
+        let status = if application_name.eq_ignore_ascii_case("Finder") {
             std::process::Command::new("open")
                 .arg("-R")
                 .arg(&file)
@@ -2255,7 +2553,7 @@ fn open_file_with_application(cwd: String, path: String, application: String) ->
         } else {
             std::process::Command::new("open")
                 .arg("-a")
-                .arg(&application)
+                .arg(application_path.as_deref().unwrap_or(Path::new(&application)))
                 .arg(&file)
                 .status()
         }
@@ -4234,6 +4532,7 @@ fn main() {
             create_permanent_worktree,
             open_file_with_default,
             open_file_with_application,
+            list_open_applications,
             open_file_with_dialog,
             workspace_file_path,
             read_config_documents,
@@ -4295,6 +4594,26 @@ mod tests {
     fn accepts_existing_workspace() {
         let workspace = checked_workspace(env!("CARGO_MANIFEST_DIR")).unwrap();
         assert!(workspace.is_dir());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn discovers_installed_open_applications_from_host() {
+        let applications = list_open_applications().unwrap();
+        assert!(applications.iter().any(|item| item.id == "com.apple.finder"));
+        assert!(applications.iter().all(|item| {
+            !item.id.trim().is_empty()
+                && !item.name.trim().is_empty()
+                && item
+                    .bundle_path
+                    .as_deref()
+                    .map_or(true, |path| Path::new(path).is_absolute())
+        }));
+        assert!(applications.iter().any(|item| {
+            item.icon_data_url
+                .as_deref()
+                .map_or(false, |value| value.starts_with("data:image/png;base64,"))
+        }));
     }
 
     #[test]
