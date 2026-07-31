@@ -127,6 +127,23 @@ struct PreviewFile {
     content: String,
 }
 
+/// Binary-safe response used by Grok's TUI-style `x.ai/fs/read_file`
+/// extension.  The standard ACP `fs/read_text_file` method is intentionally
+/// text-only; the extension adds the same `contentBase64`/`type` fields that
+/// the upstream CLI uses for images and other binary files.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpReadFile {
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_base64: Option<String>,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_count: Option<u64>,
+    #[serde(rename = "type")]
+    content_type: String,
+}
+
 /// An image that the operator explicitly referenced in the outgoing prompt.
 ///
 /// This is deliberately separate from ACP's `fs/read_text_file`: ACP only
@@ -720,7 +737,10 @@ fn checked_acp_readable_file(workspace: &Path, requested: &str) -> Result<PathBu
     let grok = grok_home()?;
     let roots = [
         grok.join("skills"),
-        grok.join("bundled").join("skills"),
+        // Bundled skills can reference sibling templates/assets under this
+        // read-only tree, so allow the whole bundled root rather than only
+        // its `skills` child.
+        grok.join("bundled"),
         // The official CLI persists session checkpoints here. These remain
         // read-only; only ACP text writes inside the active workspace are
         // permitted.
@@ -737,7 +757,19 @@ fn checked_read_file_with_roots(
     requested: &str,
     readonly_roots: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(requested);
+    let candidate = if requested == "~"
+        || requested.starts_with("~/")
+        || requested.starts_with("~\\")
+    {
+        let home = user_home()?;
+        if requested == "~" {
+            home
+        } else {
+            home.join(&requested[2..])
+        }
+    } else {
+        PathBuf::from(requested)
+    };
     let candidate = if candidate.is_absolute() {
         candidate
     } else {
@@ -753,7 +785,7 @@ fn checked_read_file_with_roots(
     {
         return Ok(canonical);
     }
-    Err("只能读取当前项目或 Grok 的 Skills、Sessions 目录下的文本文件".into())
+    Err("只能读取当前项目或 Grok 的 Skills、Bundled、Sessions 目录下的文件".into())
 }
 
 /// Identify accepted image formats from their contents rather than a mutable
@@ -800,7 +832,10 @@ fn checked_explicit_prompt_image(workspace: &Path, requested: &str) -> Result<Pa
             home.join(&requested[2..])
         }
     } else {
-        let path = if requested.starts_with("file:") {
+        let path = if requested
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+        {
             url::Url::parse(requested)
                 .map_err(|error| format!("无效 file:// 图片路径：{error}"))?
                 .to_file_path()
@@ -1130,6 +1165,75 @@ fn acp_read_text_file(
         .collect())
 }
 
+fn build_acp_read_file(bytes: Vec<u8>, line: Option<u32>, limit: Option<u32>) -> AcpReadFile {
+    let size = bytes.len() as u64;
+    if let Some(mime) = image_mime(&bytes) {
+        return AcpReadFile {
+            content: String::new(),
+            content_base64: Some(BASE64.encode(bytes)),
+            size,
+            line_count: None,
+            content_type: mime.to_string(),
+        };
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(full_text) => {
+            let line_count = Some(full_text.lines().count() as u64);
+            let content = if line.is_none() && limit.is_none() {
+                full_text
+            } else {
+                let start = line.unwrap_or(1).max(1).saturating_sub(1) as usize;
+                let take = limit.map(|value| value as usize).unwrap_or(usize::MAX);
+                full_text
+                    .split_inclusive('\n')
+                    .skip(start)
+                    .take(take)
+                    .collect()
+            };
+            AcpReadFile {
+                content,
+                content_base64: None,
+                size,
+                line_count,
+                content_type: "text/plain".into(),
+            }
+        }
+        Err(error) => AcpReadFile {
+            content: String::new(),
+            content_base64: Some(BASE64.encode(error.into_bytes())),
+            size,
+            line_count: None,
+            content_type: "application/octet-stream".into(),
+        },
+    }
+}
+
+/// Read the TUI-compatible, binary-safe file response.  Unlike
+/// `acp_read_text_file`, this command deliberately never calls
+/// `read_to_string` for an image: PNG/JPEG/etc. are returned as base64 bytes
+/// so the model can receive them as a multimodal tool result.
+#[tauri::command]
+fn acp_read_file(
+    cwd: String,
+    path: String,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<AcpReadFile, String> {
+    let workspace = checked_workspace(&cwd)?;
+    let file = checked_acp_readable_file(&workspace, &path)?;
+    let metadata = fs::metadata(&file)
+        .map_err(|error| format!("无法读取 {}：{error}", file.display()))?;
+    if !metadata.is_file() {
+        return Err("只能读取文件".into());
+    }
+    if metadata.len() > MAX_ACP_TEXT_BYTES {
+        return Err("文件不能超过 16 MB".into());
+    }
+    let bytes = fs::read(&file).map_err(|error| format!("无法读取 {}：{error}", file.display()))?;
+    Ok(build_acp_read_file(bytes, line, limit))
+}
+
 #[tauri::command]
 fn read_prompt_image_paths(cwd: String, paths: Vec<String>) -> Result<Vec<PromptPathImage>, String> {
     if paths.len() > 8 {
@@ -1151,16 +1255,15 @@ fn read_prompt_image_paths(cwd: String, paths: Vec<String>) -> Result<Vec<Prompt
         if !seen.insert(path.clone()) {
             continue;
         }
-        let metadata = fs::metadata(&file)
-            .map_err(|error| format!("无法读取图片 {}：{error}", file.display()))?;
-        total_size = total_size.saturating_add(metadata.len());
-        if total_size > MAX_PROMPT_IMAGE_TOTAL_BYTES {
-            return Err("路径图片总大小不能超过 32 MB".into());
-        }
         let bytes = fs::read(&file)
             .map_err(|error| format!("无法读取图片 {}：{error}", file.display()))?;
-        if bytes.len() as u64 > MAX_PROMPT_IMAGE_BYTES {
+        let size = bytes.len() as u64;
+        if size > MAX_PROMPT_IMAGE_BYTES {
             return Err("单张图片不能超过 16 MB".into());
+        }
+        total_size = total_size.saturating_add(size);
+        if total_size > MAX_PROMPT_IMAGE_TOTAL_BYTES {
+            return Err("路径图片总大小不能超过 32 MB".into());
         }
         let mime = image_mime(&bytes)
             .ok_or_else(|| "图片内容不是受支持的图片格式".to_string())?;
@@ -1172,7 +1275,7 @@ fn read_prompt_image_paths(cwd: String, paths: Vec<String>) -> Result<Vec<Prompt
                 .unwrap_or("image")
                 .to_string(),
             mime: mime.to_string(),
-            size: metadata.len(),
+            size,
             data: BASE64.encode(bytes),
         });
     }
@@ -2124,6 +2227,67 @@ fn open_file_with_default(cwd: String, path: String) -> Result<(), String> {
         .arg(&file)
         .spawn()
         .map_err(|error| format!("无法打开默认应用：{error}"))?;
+    Ok(())
+}
+
+/// Let the operating system present its application chooser for a workspace
+/// file.  macOS has no `open` flag for this, so use LaunchServices through a
+/// short, escaped AppleScript; Windows exposes the same chooser via
+/// `OpenAs_RunDLL`.  Linux desktops fall back to their file-manager opener.
+#[tauri::command]
+fn open_file_with_dialog(cwd: String, path: String) -> Result<(), String> {
+    let root = checked_workspace(&cwd)?;
+    let file = checked_workspace_file(&root, &path)?;
+    if !file.is_file() {
+        return Err("只能选择文件的打开方式".into());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("rundll32.exe")
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(path_for_webview(&file))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("无法打开“打开方式”对话框：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fn apple_script_string(value: &str) -> String {
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+        }
+        let path = apple_script_string(&path_for_webview(&file));
+        let script = format!(
+            "set targetPath to \"{path}\"\nset chosenApp to choose application with prompt \"选择用于打开文件的应用\"\nset appPath to POSIX path of (chosenApp as alias)\ndo shell script \"open -a \" & quoted form of appPath & \" \" & quoted form of targetPath"
+        );
+        let output = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map_err(|error| format!("无法打开应用选择器：{error}"))?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !message.to_ascii_lowercase().contains("user canceled")
+                && !message.to_ascii_lowercase().contains("用户取消")
+            {
+                return Err(if message.is_empty() {
+                    "无法打开应用选择器".into()
+                } else {
+                    format!("无法打开应用选择器：{message}")
+                });
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open")
+        .arg(&file)
+        .spawn()
+        .map_err(|error| format!("无法打开系统文件选择器：{error}"))?;
     Ok(())
 }
 
@@ -3963,11 +4127,13 @@ fn main() {
             read_preview_file,
             start_file_preview,
             acp_read_text_file,
+            acp_read_file,
             read_prompt_image_paths,
             acp_write_text_file,
             open_in_explorer,
             reveal_in_explorer,
             open_file_with_default,
+            open_file_with_dialog,
             workspace_file_path,
             read_config_documents,
             write_config_document,
@@ -4062,6 +4228,43 @@ mod tests {
         )
         .is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn acp_read_file_returns_multimodal_payload_for_images() {
+        let root = std::env::temp_dir().join(format!(
+            "grox-acp-image-{}-{}",
+            std::process::id(),
+            CONFIG_WRITE_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("diagram.png");
+        let bytes = BASE64
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLqXQAAAABJRU5ErkJggg==")
+            .unwrap();
+        fs::write(&file, &bytes).unwrap();
+        let payload = acp_read_file(
+            path_for_webview(&root),
+            path_for_webview(&file),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(payload.content.is_empty());
+        assert_eq!(payload.content_type, "image/png");
+        assert_eq!(payload.size, bytes.len() as u64);
+        assert_eq!(payload.content_base64, Some(BASE64.encode(bytes)));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn acp_read_file_keeps_text_ranges_and_full_size() {
+        let payload = build_acp_read_file(b"one\ntwo\nthree\n".to_vec(), Some(2), Some(1));
+        assert_eq!(payload.content, "two\n");
+        assert_eq!(payload.content_type, "text/plain");
+        assert_eq!(payload.size, 14);
+        assert_eq!(payload.line_count, Some(3));
+        assert!(payload.content_base64.is_none());
     }
 
     #[test]

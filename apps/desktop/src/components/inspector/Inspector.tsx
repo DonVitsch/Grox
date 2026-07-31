@@ -230,6 +230,7 @@ function FileActionMenu({
       {open && <div className="absolute right-0 top-6 z-50 w-40 rounded-[5px] border border-line2 bg-panel p-1 shadow-[0_10px_28px_rgba(0,0,0,0.38)]">
         {previewable && <FileAction label={zh ? "在右侧预览" : "Preview"} icon="panelRight" onClick={() => { onOpen(path); setOpen(false); }} />}
         <FileAction label={zh ? "用默认应用打开" : "Open with default"} icon="external" onClick={() => void run(() => invoke("open_file_with_default", { cwd: workspace, path }))} />
+        <FileAction label={zh ? "打开方式…" : "Open with…"} icon="external" onClick={() => void run(() => invoke("open_file_with_dialog", { cwd: workspace, path }))} />
         <FileAction label={zh ? "在 Finder 中显示" : "Reveal in Finder"} icon="folder" onClick={() => void run(() => invoke("reveal_in_explorer", { cwd: workspace, path }))} />
         <FileAction label={zh ? "复制路径" : "Copy path"} icon="copy" onClick={() => void copyPath()} />
         {previewable && !/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(path) && <FileAction label={zh ? "复制文件内容" : "Copy contents"} icon="copy" onClick={() => void copyContent()} />}

@@ -298,7 +298,13 @@ function ProjectRow({ project, active, expanded, count, onToggle }: { project: P
   };
 
   return (
-    <div className={`group relative mb-px flex h-8 items-center gap-1 rounded-[4px] px-1 ${active ? "bg-high text-fg" : "text-fg2 hover:bg-high/60"}`}>
+    <div
+      className={`group relative mb-px flex h-8 items-center gap-1 rounded-[4px] px-1 ${active ? "bg-high text-fg" : "text-fg2 hover:bg-high/60"}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu(true);
+      }}
+    >
       <button onClick={onToggle} className="flex h-6 w-5 shrink-0 items-center justify-center text-faint hover:text-fg" title={expanded ? "Collapse" : "Expand"}>
         <Icon name="chevronRight" size={9} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />
       </button>
@@ -364,7 +370,15 @@ function MissionRow({ meta, status, completionUnread, active, tokens, onOpen }: 
   };
 
   return (
-    <div className={`group relative mb-px cursor-pointer rounded-[4px] border-l-2 px-2 py-1.5 ${active ? "border-acc bg-high" : "border-transparent hover:bg-high/60"}`} onClick={onOpen}>
+    <div
+      className={`group relative mb-px cursor-pointer rounded-[4px] border-l-2 px-2 py-1.5 ${active ? "border-acc bg-high" : "border-transparent hover:bg-high/60"}`}
+      onClick={onOpen}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu(true);
+      }}
+    >
       <div className="flex items-center gap-2">
         <SessionStatusLight status={status} completionUnread={completionUnread} />
         <span className={status === "running" || status.startsWith("awaiting_") ? "" : "opacity-55"}><BlackHole size={11} spin={status === "running" ? true : status.startsWith("awaiting_") ? "slow" : false} /></span>
