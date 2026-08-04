@@ -7,6 +7,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { bridge } from "../bridge";
 import { isSessionTerminal, MODELS } from "../bridge/types";
+import { notifyDesktop } from "../lib/notify";
 import type {
   AgentMode,
   AccountInfo,
@@ -158,6 +159,8 @@ interface DesktopState {
   effort: Effort;
   mode: AgentMode;
   permissionMode: PermissionMode;
+  computerUseEnabled: boolean;
+  browserUseEnabled: boolean;
   sessionComposers: Record<string, SessionComposerState>;
   /** Model choices made during a turn, applied only when that turn settles. */
   pendingSessionModels: Record<string, string>;
@@ -234,6 +237,8 @@ interface DesktopState {
   setEffort(effort: Effort): void;
   setMode(mode: AgentMode): void;
   setPermissionMode(mode: PermissionMode): void;
+  setComputerUseEnabled(enabled: boolean): void;
+  setBrowserUseEnabled(enabled: boolean): void;
   setDraft(text: string): void;
   setComposerAttachments(attachments: PromptAttachment[]): void;
   setInspectorTab(tab: InspectorTab): void;
@@ -841,6 +846,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
         if (e.req.purpose === "plan" && get().activeId === e.sessionId) {
           set({ planPreviewOpen: true, previewOpen: false });
         }
+        void notifyDesktop(
+          localStorage.getItem("grox.language") === "en-US" ? "Approval needed" : "需要批准",
+          e.req.description || (localStorage.getItem("grox.language") === "en-US" ? "Grok is waiting for permission" : "Grok 正在等待工具权限"),
+        );
         break;
       case "permission_resolved":
         withSession(e.sessionId, (s) => ({
@@ -862,6 +871,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
             { type: "question", id: e.blockId, req: e.req, ts: Date.now() },
           ],
         }));
+        void notifyDesktop(
+          localStorage.getItem("grox.language") === "en-US" ? "Question pending" : "需要回答",
+          localStorage.getItem("grox.language") === "en-US" ? "Grok is waiting for your answer" : "Grok 正在等待你的回答",
+        );
         break;
       case "question_resolved":
         withSession(e.sessionId, (s) => ({
@@ -975,6 +988,8 @@ export const useDesktop = create<DesktopState>((set, get) => {
         : localStorage.getItem("grok.permissionMode") === "bypass"
           ? "bypass"
           : "default",
+    computerUseEnabled: localStorage.getItem("grox.computerUseEnabled") !== "0",
+    browserUseEnabled: localStorage.getItem("grox.browserUseEnabled") !== "0",
     sessionComposers: loadSessionComposers(),
     pendingSessionModels: {},
 
@@ -1900,7 +1915,20 @@ export const useDesktop = create<DesktopState>((set, get) => {
       });
     },
     setPermissionMode: (permissionMode) => {
-      const { activeId, sessionComposers, model, effort, mode } = get();
+      const { activeId, sessionComposers, model, effort, mode, computerUseEnabled } = get();
+      if (permissionMode === "bypass") {
+        const zh = document.documentElement.lang.startsWith("zh");
+        const confirmed = window.confirm(
+          zh
+            ? "Bypass/YOLO 会跳过工具审批，仅应在完全可信环境使用。确定启用？"
+            : "Bypass/YOLO skips tool approvals. Use only in fully trusted environments. Enable?",
+        );
+        if (!confirmed) return;
+        if (computerUseEnabled) {
+          bridge.setComputerUseEnabled(false);
+          set({ computerUseEnabled: false });
+        }
+      }
       localStorage.setItem("grok.permissionMode", permissionMode);
       bridge.setPermissionMode(permissionMode);
       if (!activeId) return set({ permissionMode });
@@ -1908,6 +1936,20 @@ export const useDesktop = create<DesktopState>((set, get) => {
       const next = { ...sessionComposers, [activeId]: { ...current, permissionMode } };
       persistSessionComposers(next);
       set({ permissionMode, sessionComposers: next });
+    },
+    setComputerUseEnabled(enabled) {
+      const { permissionMode } = get();
+      if (enabled && permissionMode === "bypass") {
+        localStorage.setItem("grok.permissionMode", "default");
+        bridge.setPermissionMode("default");
+        set({ permissionMode: "default" });
+      }
+      bridge.setComputerUseEnabled(enabled);
+      set({ computerUseEnabled: enabled });
+    },
+    setBrowserUseEnabled(enabled) {
+      bridge.setBrowserUseEnabled(enabled);
+      set({ browserUseEnabled: enabled });
     },
     setDraft(text) {
       const { activeId, sessionComposers, model, effort, mode, permissionMode } = get();

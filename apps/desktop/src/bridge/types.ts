@@ -338,6 +338,7 @@ export interface ProviderStatus {
 export interface ProviderProfileSummary {
   id: string;
   name: string;
+  /** Always empty from the native layer; use hasApiKey + blank-to-keep on save. */
   apiKey: string;
   hasApiKey: boolean;
   baseUrl: string;
