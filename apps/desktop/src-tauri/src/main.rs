@@ -73,7 +73,21 @@ const PROVIDER_ENV_KEYS: [&str; 3] = [
 ];
 const MAX_PROMPT_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROMPT_IMAGE_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PROVIDER_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MEDIA_REFERENCE_BYTES: usize = 24 * 1024 * 1024;
+const MEDIA_HTTPS_HOST_ALLOWLIST: &[&str] = &[
+    "x.ai",
+    "grok.com",
+    "grok.x.ai",
+    "cdn.x.ai",
+    "assets.x.ai",
+    "imagine.x.ai",
+];
 const MAX_SESSION_PREVIEW_MESSAGES: usize = 200;
+const MAX_SESSION_SEARCH_IDS: usize = 2_000;
+const MAX_SESSION_SEARCH_HITS: usize = 500;
+const MAX_SESSION_SEARCH_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SESSION_SEARCH_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
 struct AgentProcess {
     child: Child,
@@ -375,6 +389,32 @@ enum ProviderApiBackend {
     ChatCompletions,
 }
 
+impl ProviderApiBackend {
+    fn config_value(self, provider_name: &str, base_url: &str) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+            Self::Auto => {
+                let identity = format!("{provider_name} {base_url}").to_ascii_lowercase();
+                if [
+                    "grok2api",
+                    "cliproxyapi",
+                    "cli-proxy-api",
+                    "router-for-me",
+                    "newapi",
+                ]
+                .iter()
+                .any(|marker| identity.contains(marker))
+                {
+                    "responses"
+                } else {
+                    "chat_completions"
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredProviderProfile {
@@ -643,6 +683,124 @@ fn preview_session_from_disk(id: String) -> Result<Option<SessionDiskPreview>, S
         .map_err(|error| format!("无法打开会话预览 {}：{error}", path.display()))?;
     parse_session_disk_preview(std::io::BufReader::new(file), MAX_SESSION_PREVIEW_MESSAGES)
         .map(Some)
+}
+
+fn valid_session_id(id: &str) -> bool {
+    let mut components = Path::new(id).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn session_history_candidates(
+    grok: &Path,
+    wanted: &BTreeSet<String>,
+) -> Result<BTreeMap<String, PathBuf>, String> {
+    let sessions = grok.join("sessions");
+    if !sessions.is_dir() {
+        return Ok(BTreeMap::new());
+    }
+    let root = sessions
+        .canonicalize()
+        .map_err(|error| format!("无法读取 Grok 会话目录：{error}"))?;
+    let mut found = BTreeMap::new();
+    let mut inspect_directory = |directory: &Path| {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !wanted.contains(&id) || found.contains_key(&id) {
+                continue;
+            }
+            let candidate = entry.path().join("chat_history.jsonl");
+            let Ok(candidate) = candidate.canonicalize() else {
+                continue;
+            };
+            if candidate.starts_with(&root) && candidate.is_file() {
+                found.insert(id, candidate);
+            }
+        }
+    };
+    inspect_directory(&root);
+    for workspace in fs::read_dir(&root)
+        .map_err(|error| format!("无法扫描 Grok 会话目录：{error}"))?
+        .filter_map(Result::ok)
+    {
+        if workspace.path().is_dir() {
+            inspect_directory(&workspace.path());
+        }
+    }
+    Ok(found)
+}
+
+fn session_history_content_matches(content: &str, needle: &str) -> bool {
+    content.lines().any(|line| {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let Some(role @ ("user" | "assistant")) =
+            value.get("type").and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        if role == "user" && value.get("synthetic_reason").is_some() {
+            return false;
+        }
+        value
+            .get("content")
+            .and_then(session_history_text)
+            .is_some_and(|text| text.to_lowercase().contains(needle))
+    })
+}
+
+#[tauri::command]
+fn search_session_history(query: String, session_ids: Vec<String>) -> Result<Vec<String>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    if query.chars().count() > 200 {
+        return Err("会话搜索词不能超过 200 个字符".into());
+    }
+    if session_ids.len() > MAX_SESSION_SEARCH_IDS
+        || session_ids.iter().any(|id| !valid_session_id(id))
+    {
+        return Err("会话搜索范围无效或过大".into());
+    }
+    let wanted = session_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let candidates = session_history_candidates(&grok_home()?, &wanted)?;
+    let needle = query.to_lowercase();
+    let mut scanned_bytes = 0_u64;
+    let mut matches = BTreeSet::new();
+    for id in &session_ids {
+        if matches.len() >= MAX_SESSION_SEARCH_HITS {
+            break;
+        }
+        let Some(path) = candidates.get(id) else {
+            continue;
+        };
+        let Ok(size) = path.metadata().map(|metadata| metadata.len()) else {
+            continue;
+        };
+        if size > MAX_SESSION_SEARCH_FILE_BYTES
+            || scanned_bytes.saturating_add(size) > MAX_SESSION_SEARCH_TOTAL_BYTES
+        {
+            continue;
+        }
+        scanned_bytes += size;
+        let Ok(content) = read_bounded_text(path, MAX_SESSION_SEARCH_FILE_BYTES) else {
+            continue;
+        };
+        let matched = session_history_content_matches(&content, &needle);
+        if matched {
+            matches.insert(id.clone());
+        }
+    }
+    Ok(session_ids
+        .into_iter()
+        .filter(|id| matches.contains(id))
+        .collect())
 }
 
 /// Resolve the actual user home independently of `GROK_HOME`. The latter may
@@ -1033,6 +1191,15 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+fn prompt_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    match image_mime(bytes) {
+        // SVG 是带主动内容能力的文本，也不是通用多模态输入格式。文件预览仍可
+        // 支持 SVG，但不能把它作为图片附件发送给供应商。
+        Some("image/svg+xml") | None => None,
+        mime => mime,
+    }
+}
+
 /// Resolve a path the user themselves supplied in the composer. This does not
 /// change the agent's filesystem authority: only image files explicitly named
 /// in a message become that message's multimodal attachments.
@@ -1082,8 +1249,8 @@ fn checked_explicit_prompt_image(workspace: &Path, requested: &str) -> Result<Pa
     }
     let bytes = fs::read(&canonical)
         .map_err(|error| format!("无法读取图片 {}：{error}", canonical.display()))?;
-    if image_mime(&bytes).is_none() {
-        return Err("图片内容不是受支持的 PNG、JPG、GIF、WebP、SVG 或 BMP 格式".into());
+    if prompt_image_mime(&bytes).is_none() {
+        return Err("图片内容不是受支持的 PNG、JPG、GIF、WebP 或 BMP 格式".into());
     }
     Ok(canonical)
 }
@@ -1091,10 +1258,62 @@ fn checked_explicit_prompt_image(workspace: &Path, requested: &str) -> Result<Pa
 fn is_loopback_host(host: Option<&str>) -> bool {
     let Some(host) = host else { return false };
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(|address| {
+        address.is_loopback()
+            || matches!(address, std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()))
+    })
+}
+
+fn is_blocked_service_host(host: Option<&str>) -> bool {
+    let Some(host) = host.map(|value| {
+        value
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    }) else {
+        return true;
+    };
+    if host.is_empty()
+        || host == "metadata"
+        || host == "metadata.google.internal"
+        || host.ends_with(".metadata.google.internal")
+        || host == "instance-data"
+        || host == "instance-data.ec2.internal"
+        || host == "metadata.azure.com"
+        || host.ends_with(".metadata.azure.com")
+        || host == "kubernetes.default"
+        || host == "kubernetes.default.svc"
+        || host.ends_with(".kubernetes.default.svc")
+    {
+        return true;
+    }
+    let Ok(address) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_unspecified()
+                || v4.is_broadcast()
+                || (octets[0] == 169 && octets[1] == 254)
+                || octets == [100, 100, 100, 200]
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            v6.to_ipv4_mapped().is_some_and(|v4| {
+                let octets = v4.octets();
+                (octets[0] == 169 && octets[1] == 254)
+                    || octets == [100, 100, 100, 200]
+            })
+        }
+    }
 }
 
 fn checked_service_url(value: &str, label: &str) -> Result<String, String> {
@@ -1102,6 +1321,9 @@ fn checked_service_url(value: &str, label: &str) -> Result<String, String> {
     let parsed = url::Url::parse(value).map_err(|error| format!("无效{label}：{error}"))?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!("{label}不能在 URL 中包含用户名或密码"));
+    }
+    if is_blocked_service_host(parsed.host_str()) {
+        return Err(format!("{label}不能指向云元数据或链路本地地址"));
     }
     let secure = parsed.scheme() == "https";
     let local_http = parsed.scheme() == "http" && is_loopback_host(parsed.host_str());
@@ -1447,7 +1669,7 @@ fn read_prompt_image_paths(cwd: String, paths: Vec<String>) -> Result<Vec<Prompt
         if total_size > MAX_PROMPT_IMAGE_TOTAL_BYTES {
             return Err("路径图片总大小不能超过 32 MB".into());
         }
-        let mime = image_mime(&bytes)
+        let mime = prompt_image_mime(&bytes)
             .ok_or_else(|| "图片内容不是受支持的图片格式".to_string())?;
         images.push(PromptPathImage {
             path,
@@ -3731,6 +3953,169 @@ fn workspace_file_path(cwd: String, path: String) -> Result<String, String> {
     Ok(path_for_webview(&file))
 }
 
+const CONFIG_SECRET_REDACTED: &str = "********";
+
+fn is_redacted_config_secret(value: &str) -> bool {
+    let value = value.trim().trim_matches('"').trim_matches('\'');
+    value == CONFIG_SECRET_REDACTED || value == "[REDACTED]" || value.contains('…')
+}
+
+fn config_secret_key(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_uppercase().as_str(),
+        "XAI_API_KEY" | "OPENAI_API_KEY" | "ANTHROPIC_API_KEY"
+    )
+}
+
+fn redact_config_document_secrets(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            if let Some((indent, key, _, suffix)) = config_assignment_parts(line) {
+                if key.eq_ignore_ascii_case("api_key") {
+                    return format!("{indent}{key} = \"{CONFIG_SECRET_REDACTED}\"{suffix}");
+                }
+                if config_secret_key(key) {
+                    return format!("{indent}{key}={CONFIG_SECRET_REDACTED}{suffix}");
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn toml_line_without_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if in_double => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return line[..index].trim_end(),
+            _ => {}
+        }
+    }
+    line.trim_end()
+}
+
+fn config_assignment_parts(line: &str) -> Option<(&str, &str, &str, &str)> {
+    let body = toml_line_without_comment(line);
+    let suffix = &line[body.len()..];
+    let (left, value) = body.split_once('=')?;
+    let key = left.trim();
+    let indent = &left[..left.len() - left.trim_start().len()];
+    (!key.is_empty()).then_some((indent, key, value.trim(), suffix))
+}
+
+fn toml_table_header_key(line: &str) -> Option<String> {
+    let line = toml_line_without_comment(line).trim();
+    (line.starts_with('[') && line.ends_with(']') && !line.starts_with("[["))
+        .then(|| line.to_string())
+}
+
+fn parse_toml_api_key_value(line: &str) -> Option<&str> {
+    let line = toml_line_without_comment(line);
+    let rest = line
+        .strip_prefix("api_key")
+        .or_else(|| line.strip_prefix("API_KEY"))?
+        .trim_start();
+    Some(
+        rest.strip_prefix('=')?
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\''),
+    )
+}
+
+fn collect_config_api_keys(content: &str) -> BTreeMap<String, String> {
+    let mut table = String::new();
+    let mut keys = BTreeMap::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = toml_table_header_key(trimmed) {
+            table = header;
+        } else if let Some(value) = parse_toml_api_key_value(trimmed) {
+            if !is_redacted_config_secret(value) {
+                keys.insert(table.clone(), value.to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn collect_config_env_keys(content: &str) -> BTreeMap<String, String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let (_, key, value, _) = config_assignment_parts(line)?;
+            config_secret_key(key).then(|| {
+                (
+                    key.to_ascii_uppercase(),
+                    value.trim_matches('"').trim_matches('\'').to_string(),
+                )
+            })
+        })
+        .filter(|(_, value)| !is_redacted_config_secret(value))
+        .collect()
+}
+
+fn config_contains_redacted_secret(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        parse_toml_api_key_value(trimmed).is_some_and(is_redacted_config_secret)
+            || config_assignment_parts(line).is_some_and(|(_, key, value, _)| {
+                config_secret_key(key) && is_redacted_config_secret(value)
+            })
+    })
+}
+
+/// 设置页只持有脱敏草稿；保存时按 TOML 表名恢复原密钥，绝不按行号猜测。
+fn merge_config_secrets_from_existing(existing: &str, incoming: &str) -> Result<String, String> {
+    let prior_api = collect_config_api_keys(existing);
+    let prior_env = collect_config_env_keys(existing);
+    let mut table = String::new();
+    let mut output = Vec::new();
+    for line in incoming.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = toml_table_header_key(trimmed) {
+            table = header;
+            output.push(line.to_string());
+            continue;
+        }
+        if let Some(value) = parse_toml_api_key_value(trimmed) {
+            if is_redacted_config_secret(value) {
+                let real = prior_api.get(&table).ok_or_else(|| {
+                    format!("无法安全恢复 {table} 的 api_key，请重新输入该段密钥")
+                })?;
+                let (indent, key, _, suffix) = config_assignment_parts(line)
+                    .ok_or_else(|| "无法解析 api_key 配置行".to_string())?;
+                let quoted = serde_json::to_string(real)
+                    .map_err(|error| format!("无法编码配置密钥：{error}"))?;
+                output.push(format!("{indent}{key} = {quoted}{suffix}"));
+                continue;
+            }
+        }
+        if let Some((indent, key, raw, suffix)) = config_assignment_parts(line) {
+            if config_secret_key(key) && is_redacted_config_secret(raw) {
+                let real = prior_env
+                    .get(&key.to_ascii_uppercase())
+                    .ok_or_else(|| format!("无法安全恢复环境变量密钥 {key}，请重新输入"))?;
+                output.push(format!("{indent}{key}={}{suffix}", env_value(real)));
+                continue;
+            }
+        }
+        output.push(line.to_string());
+    }
+    Ok(output.join("\n"))
+}
+
 #[tauri::command]
 fn read_config_documents(cwd: String) -> Result<Vec<ConfigDocument>, String> {
     let cwd = checked_workspace(&cwd)?;
@@ -3739,11 +4124,16 @@ fn read_config_documents(cwd: String) -> Result<Vec<ConfigDocument>, String> {
         .map(|id| {
             let (path, label, language) = config_path(id, &cwd)?;
             let exists = path.is_file();
+            let content = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
             Ok(ConfigDocument {
                 id,
                 label,
                 path: path_for_webview(&path),
-                content: read_bounded_text(&path, MAX_CONFIG_BYTES)?,
+                content: if id == "config" {
+                    redact_config_document_secrets(&content)
+                } else {
+                    content
+                },
                 exists,
                 language,
             })
@@ -3755,13 +4145,24 @@ fn read_config_documents(cwd: String) -> Result<Vec<ConfigDocument>, String> {
 fn write_config_document(request: WriteConfigDocument) -> Result<ConfigDocument, String> {
     let cwd = checked_workspace(&request.cwd)?;
     let (path, label, language) = config_path(&request.id, &cwd)?;
+    let content = if request.id == "config" && path.is_file() {
+        let existing = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
+        merge_config_secrets_from_existing(&existing, &request.content)?
+    } else if request.id == "config" && config_contains_redacted_secret(&request.content) {
+        return Err("新配置不能只含脱敏占位符，请填写真实 API Key".into());
+    } else {
+        request.content.clone()
+    };
     if request.id == "config" {
         // This is the same TOML parser used before Grox mutates provider
         // settings. Reject malformed TOML at the editor boundary so a save can
         // never silently leave the CLI with an unreadable global config.
-        parse_grok_config_document(&request.content)?;
+        parse_grok_config_document(&content)?;
     }
-    atomic_write(&path, &request.content)?;
+    atomic_write(&path, &content)?;
+    if matches!(request.id.as_str(), "config" | "system-prompt") {
+        restrict_private_file(&path)?;
+    }
     let id: &'static str = match request.id.as_str() {
         "config" => "config",
         "system-prompt" => "system-prompt",
@@ -3772,7 +4173,11 @@ fn write_config_document(request: WriteConfigDocument) -> Result<ConfigDocument,
         id,
         label,
         path: path_for_webview(&path),
-        content: request.content,
+        content: if id == "config" {
+            redact_config_document_secrets(&content)
+        } else {
+            content
+        },
         exists: true,
         language,
     })
@@ -4094,6 +4499,7 @@ fn apply_grox_provider_backend_overrides(
     model_ids: &[String],
     base_url: &str,
     primary_model: &str,
+    api_backend: &str,
 ) -> Result<(), String> {
     // Switches are transactional at the config level: first restore the
     // previous profile's exact values, then add Chat Completions only for the
@@ -4137,7 +4543,7 @@ fn apply_grox_provider_backend_overrides(
         // secret remains solely in the ACP child's managed environment.
         model.insert("env_key", toml_value("XAI_API_KEY"));
         model.insert("base_url", toml_value(base_url));
-        model.insert("api_backend", toml_value("chat_completions"));
+        model.insert("api_backend", toml_value(api_backend));
         if is_title_alias && primary_model != "grok-4.5" {
             // Grok Build uses this alias to generate a title before the first
             // reply. Route that internal request to the profile's actual
@@ -4184,9 +4590,8 @@ fn compatible_profile_backend_model_ids(profile: &StoredProviderProfile) -> Vec<
     canonicalize_resident_models(&mut models, &profile.available_models);
     // Grok Build 0.2.x still uses grok-4.5 for session-title generation even
     // when a dynamic provider selected another model. It inherits the active
-    // endpoint, so it needs the same Chat Completions transport declaration;
-    // otherwise a failed title request triggers auth recovery for the entire
-    // prompt before the selected model can answer.
+    // endpoint, so it needs the same transport declaration; otherwise a failed
+    // title request triggers auth recovery before the selected model can answer.
     if !models.iter().any(|model| model == "grok-4.5") {
         models.push("grok-4.5".to_string());
     }
@@ -4288,7 +4693,8 @@ fn synchronize_active_provider_backend() -> Result<(), String> {
         let primary_model = model_ids
             .first()
             .ok_or("当前供应商没有可用模型，无法配置请求协议")?;
-        apply_grox_provider_backend_overrides(&model_ids, &profile.base_url, primary_model)
+        let backend = profile.api_backend.config_value(&profile.name, &profile.base_url);
+        apply_grox_provider_backend_overrides(&model_ids, &profile.base_url, primary_model, backend)
     } else {
         // OAuth and official API mode should never retain a custom endpoint's
         // Chat Completions override after a process restart.
@@ -4380,9 +4786,25 @@ async fn fetch_compatible_models(api_key: &str, base_url: &str) -> Result<Vec<St
         return Err("API Key 不能为空".into());
     }
     let endpoint = compatible_models_url(base_url)?;
-    let response = reqwest::Client::builder()
+    let mut response = reqwest::Client::builder()
         .user_agent(format!("Grox/{CLIENT_VERSION}"))
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.error("provider redirect limit exceeded");
+            }
+            let url = attempt.url();
+            let allowed = match url.scheme() {
+                "https" => !is_blocked_service_host(url.host_str()),
+                "http" => is_loopback_host(url.host_str()),
+                _ => false,
+            };
+            if allowed {
+                attempt.follow()
+            } else {
+                attempt.error("provider redirect refused")
+            }
+        }))
         .build()
         .map_err(|error| format!("无法创建模型目录客户端：{error}"))?
         .get(endpoint)
@@ -4392,14 +4814,39 @@ async fn fetch_compatible_models(api_key: &str, base_url: &str) -> Result<Vec<St
         .await
         .map_err(|error| format!("无法获取模型列表：{error}"))?
         .error_for_status()
-        .map_err(|error| format!("模型服务返回错误：{error}"))?
-        .json::<OpenAiModelsResponse>()
+        .map_err(|error| format!("模型服务返回错误：{error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_MODELS_BODY_BYTES as u64)
+    {
+        return Err(format!(
+            "模型列表响应超过 {} MB 上限",
+            MAX_PROVIDER_MODELS_BODY_BYTES / 1024 / 1024
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
+        .map_err(|error| format!("无法读取模型列表：{error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_PROVIDER_MODELS_BODY_BYTES {
+            return Err(format!(
+                "模型列表响应超过 {} MB 上限",
+                MAX_PROVIDER_MODELS_BODY_BYTES / 1024 / 1024
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let response: OpenAiModelsResponse = serde_json::from_slice(&body)
         .map_err(|error| format!("模型列表不是 OpenAI 兼容格式：{error}"))?;
     let mut models = response
         .data
         .into_iter()
         .map(|model| model.id)
+        .filter(|id| {
+            !id.is_empty() && id.chars().count() <= 200 && !id.chars().any(char::is_control)
+        })
         .collect::<Vec<_>>();
     models.sort_by_key(|model| model.to_ascii_lowercase());
     models.dedup();
@@ -4458,7 +4905,8 @@ fn activate_provider_profile(id: String) -> Result<(), String> {
     let primary_model = model_ids
         .first()
         .ok_or("供应商没有可用模型；请先获取模型目录并选择一个模型")?;
-    apply_grox_provider_backend_overrides(&model_ids, &profile.base_url, primary_model)?;
+    let backend = profile.api_backend.config_value(&profile.name, &profile.base_url);
+    apply_grox_provider_backend_overrides(&model_ids, &profile.base_url, primary_model, backend)?;
     let replacement = compatible_provider_env(&profile.api_key, &profile.base_url)?;
     let path = grok_home()?.join(".env");
     let current = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
@@ -4594,6 +5042,29 @@ fn open_external(url: String) -> Result<(), String> {
         .map_err(|error| format!("无法打开浏览器：{error}"))?;
 
     Ok(())
+}
+
+fn is_media_https_host_allowed(host: Option<&str>) -> bool {
+    let Some(host) = host.map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase()) else {
+        return false;
+    };
+    MEDIA_HTTPS_HOST_ALLOWLIST
+        .iter()
+        .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+}
+
+#[tauri::command]
+fn open_media_external(url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(&url).map_err(|error| format!("无效媒体链接：{error}"))?;
+    let allowed = match parsed.scheme() {
+        "https" => is_media_https_host_allowed(parsed.host_str()),
+        "http" => is_loopback_host(parsed.host_str()),
+        _ => false,
+    };
+    if !allowed || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("媒体链接不在允许的安全域名或本机回环地址中".into());
+    }
+    open_external(parsed.to_string())
 }
 
 fn ensure_computer_plugin() -> Result<PathBuf, String> {
@@ -4746,8 +5217,9 @@ fn save_media_reference(cwd: String, name: String, data: String) -> Result<Strin
     if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
         return Err("参考图片仅支持 PNG、JPEG 或 WebP".into());
     }
-    if data.len() > 32 * 1024 * 1024 {
-        return Err("参考图片不能超过 32 MB".into());
+    // Base64 约为原文件的 4/3；同时限制编码前后大小，不能只信任 WebView 字符数。
+    if data.len() > MAX_MEDIA_REFERENCE_BYTES.saturating_mul(4) / 3 + 1024 {
+        return Err("参考图片不能超过 24 MB".into());
     }
     let payload = data
         .rsplit_once(',')
@@ -4756,6 +5228,21 @@ fn save_media_reference(cwd: String, name: String, data: String) -> Result<Strin
     let bytes = BASE64
         .decode(payload)
         .map_err(|error| format!("参考图片编码无效：{error}"))?;
+    if bytes.len() > MAX_MEDIA_REFERENCE_BYTES {
+        return Err("参考图片不能超过 24 MB".into());
+    }
+    let detected = prompt_image_mime(&bytes).ok_or("参考图片内容不是有效的 PNG、JPEG 或 WebP")?;
+    let expected = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => unreachable!(),
+    };
+    if detected != expected {
+        return Err(format!(
+            "参考图片内容与扩展名不符（内容 {detected}，扩展名 .{extension}）"
+        ));
+    }
     let directory = cwd.join(".grox").join("media-input");
     fs::create_dir_all(&directory).map_err(|error| format!("无法创建媒体输入目录：{error}"))?;
     let path = directory.join(format!(
@@ -4914,16 +5401,20 @@ fn extract_media_artifacts(output: &str, cwd: &Path) -> Result<Vec<MediaArtifact
         } else {
             continue;
         };
-        if clean.starts_with("https://")
-            || clean.starts_with("http://localhost")
-            || clean.starts_with("http://127.0.0.1")
-        {
-            artifacts.push(MediaArtifact {
-                path: None,
-                url: Some(clean.to_string()),
-                mime: mime.into(),
-            });
-            continue;
+        if let Ok(parsed) = url::Url::parse(clean) {
+            let allowed = match parsed.scheme() {
+                "https" => is_media_https_host_allowed(parsed.host_str()),
+                "http" => is_loopback_host(parsed.host_str()),
+                _ => false,
+            };
+            if allowed && parsed.username().is_empty() && parsed.password().is_none() {
+                artifacts.push(MediaArtifact {
+                    path: None,
+                    url: Some(parsed.to_string()),
+                    mime: mime.into(),
+                });
+                continue;
+            }
         }
         let path = PathBuf::from(clean);
         let path = if path.is_absolute() {
@@ -4965,6 +5456,16 @@ fn collect_media_strings(value: &serde_json::Value, output: &mut Vec<String>) {
     }
 }
 
+fn checked_reasoning_effort(effort: Option<String>) -> Result<Option<String>, String> {
+    match effort {
+        Some(value) if matches!(value.as_str(), "low" | "medium" | "high" | "xhigh" | "max") => {
+            Ok(Some(value))
+        }
+        Some(_) => Err("无效思考强度".into()),
+        None => Ok(None),
+    }
+}
+
 /// Start a fresh ACP child and stream each stdout JSON-RPC line to the webview.
 /// A repeated call intentionally replaces the old child so a webview reload
 /// cannot initialize the same agent process twice.
@@ -4974,6 +5475,7 @@ async fn acp_spawn(
     state: tauri::State<'_, Arc<AcpState>>,
     cwd: String,
     computer_use_enabled: Option<bool>,
+    reasoning_effort: Option<String>,
 ) -> Result<u64, String> {
     let cwd = checked_workspace(&cwd)?;
 
@@ -5002,6 +5504,9 @@ async fn acp_spawn(
     let command_path = PathBuf::from(&runtime.path);
     let mut command = Command::new(&command_path);
     command.arg("agent");
+    if let Some(effort) = checked_reasoning_effort(reasoning_effort)? {
+        command.arg("--reasoning-effort").arg(effort);
+    }
     if let Some(plugin) = computer_plugin.as_ref() {
         command.arg("--plugin-dir").arg(plugin);
     }
@@ -5637,6 +6142,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             desktop_environment,
             preview_session_from_disk,
+            search_session_history,
             read_session_cache,
             write_session_cache,
             delete_session_cache,
@@ -5685,6 +6191,7 @@ fn main() {
             get_update_status,
             install_update,
             open_external,
+            open_media_external,
             start_project_preview,
             computer_session_extensions,
             computer_shutdown_lease,
@@ -5774,6 +6281,29 @@ mod tests {
             Some(history.canonicalize().unwrap())
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_history_search_matches_only_visible_user_and_assistant_text() {
+        let history = concat!(
+            "{\"type\":\"user\",\"content\":\"修复登录问题\"}\n",
+            "{\"type\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"已经完成 OAuth 修复\"}]}\n",
+            "{\"type\":\"tool\",\"content\":\"secret token\"}\n",
+            "{\"type\":\"user\",\"synthetic_reason\":\"workflow\",\"content\":\"hidden marker\"}\n",
+        );
+        assert!(session_history_content_matches(history, "oauth"));
+        assert!(session_history_content_matches(history, "登录"));
+        assert!(!session_history_content_matches(history, "secret"));
+        assert!(!session_history_content_matches(history, "hidden"));
+    }
+
+    #[test]
+    fn reasoning_effort_accepts_max_and_rejects_unknown_values() {
+        assert_eq!(
+            checked_reasoning_effort(Some("max".into())).unwrap(),
+            Some("max".into())
+        );
+        assert!(checked_reasoning_effort(Some("ultra".into())).is_err());
     }
 
     #[test]
@@ -5980,6 +6510,70 @@ mod tests {
     }
 
     #[test]
+    fn prompt_images_reject_svg_but_regular_file_preview_can_detect_it() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
+        assert_eq!(image_mime(svg), Some("image/svg+xml"));
+        assert_eq!(prompt_image_mime(svg), None);
+    }
+
+    #[test]
+    fn service_urls_reject_metadata_but_keep_private_https_gateways_available() {
+        assert!(checked_service_url("https://169.254.169.254/latest", "服务地址").is_err());
+        assert!(checked_service_url("https://[::ffff:169.254.169.254]/latest", "服务地址").is_err());
+        assert!(checked_service_url("https://metadata.google.internal/", "服务地址").is_err());
+        assert!(checked_service_url("https://192.168.1.20/v1", "服务地址").is_ok());
+        assert!(checked_service_url("http://127.0.0.1:8000/v1", "服务地址").is_ok());
+    }
+
+    #[test]
+    fn config_secrets_are_redacted_and_restored_by_table_name() {
+        let existing = r#"
+[model.local]
+api_key = "local-secret"
+[model.prod] # primary
+API_KEY = "prod-secret" # keep this key
+base_url = "https://api.example.com/v1"
+OPENAI_API_KEY="env-secret" # keep env comment
+"#;
+        let redacted = redact_config_document_secrets(existing);
+        assert!(!redacted.contains("local-secret"));
+        assert!(!redacted.contains("prod-secret"));
+        assert!(redacted.contains("API_KEY = \"********\" # keep this key"));
+        assert!(redacted.contains("OPENAI_API_KEY=******** # keep env comment"));
+        let incoming = r#"
+[model.prod] # primary
+API_KEY = "********" # keep this key
+base_url = "https://api.example.com/v2"
+OPENAI_API_KEY=******** # keep env comment
+"#;
+        let merged = merge_config_secrets_from_existing(existing, incoming).unwrap();
+        assert!(merged.contains("API_KEY = \"prod-secret\" # keep this key"));
+        assert!(merged.contains("OPENAI_API_KEY=\"env-secret\" # keep env comment"));
+        assert!(!merged.contains("local-secret"));
+        assert!(merged.contains("/v2"));
+    }
+
+    #[test]
+    fn empty_config_secret_explicitly_clears_the_existing_value() {
+        let existing = "[model.local]\napi_key = \"old-secret\"\n";
+        let incoming = "[model.local]\napi_key = \"\"\n";
+        let merged = merge_config_secrets_from_existing(existing, incoming).unwrap();
+        assert_eq!(merged, incoming.trim_end());
+        assert!(!config_contains_redacted_secret(incoming));
+    }
+
+    #[test]
+    fn config_secret_restore_fails_closed_for_a_new_table() {
+        let error = merge_config_secrets_from_existing(
+            "[model.one]\napi_key = \"real\"\n",
+            "[model.two]\napi_key = \"********\"\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("model.two"));
+        assert!(config_contains_redacted_secret("api_key = \"********\""));
+    }
+
+    #[test]
     fn static_preview_serves_project_assets_and_rejects_parent_paths() {
         tauri::async_runtime::block_on(async {
             let root = std::env::temp_dir().join(format!(
@@ -6073,6 +6667,27 @@ mod tests {
         let mut resident = vec!["Grok-4.3-fast".to_string(), "GROK-4.5".to_string()];
         canonicalize_resident_models(&mut resident, &available);
         assert_eq!(resident, available);
+    }
+
+    #[test]
+    fn provider_backend_choice_is_honored_and_auto_is_conservative() {
+        assert_eq!(
+            ProviderApiBackend::Responses.config_value("custom", "https://api.example/v1"),
+            "responses"
+        );
+        assert_eq!(
+            ProviderApiBackend::ChatCompletions
+                .config_value("custom", "https://api.example/v1"),
+            "chat_completions"
+        );
+        assert_eq!(
+            ProviderApiBackend::Auto.config_value("DeepSeek", "https://api.deepseek.com/v1"),
+            "chat_completions"
+        );
+        assert_eq!(
+            ProviderApiBackend::Auto.config_value("CLIProxyAPI", "https://gateway.example/v1"),
+            "responses"
+        );
     }
 
     #[test]
@@ -6313,7 +6928,7 @@ UNRELATED=value
         ));
         fs::write(&outside, b"png").unwrap();
         let output = format!(
-            "{{\"path\":{}}}\n{{\"path\":{}}}\n{{\"url\":\"https://example.com/result.mp4\"}}",
+            "{{\"path\":{}}}\n{{\"path\":{}}}\n{{\"url\":\"https://cdn.x.ai/result.mp4\"}}\n{{\"url\":\"https://evil.example/result.mp4\"}}",
             serde_json::to_string(&path_for_webview(&image)).unwrap(),
             serde_json::to_string(&path_for_webview(&outside)).unwrap()
         );
@@ -6323,8 +6938,34 @@ UNRELATED=value
         assert!(artifacts[0].path.is_some());
         assert_eq!(artifacts[1].mime, "video/mp4");
         assert!(artifacts[1].url.is_some());
+        assert!(artifacts.iter().all(|artifact| {
+            artifact
+                .url
+                .as_deref()
+                .is_none_or(|url| !url.contains("evil.example"))
+        }));
         let _ = fs::remove_file(&outside);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn media_reference_rejects_extension_content_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "grox-media-reference-{}",
+            CONFIG_WRITE_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let jpeg = BASE64.encode(b"\xff\xd8\xffpayload");
+        assert!(save_media_reference(path_for_webview(&root), "fake.png".into(), jpeg).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn media_url_allowlist_uses_domain_boundaries() {
+        assert!(is_media_https_host_allowed(Some("cdn.x.ai")));
+        assert!(is_media_https_host_allowed(Some("images.cdn.x.ai")));
+        assert!(!is_media_https_host_allowed(Some("x.ai.evil.example")));
+        assert!(!is_media_https_host_allowed(Some("evil.example")));
     }
 
     #[test]
