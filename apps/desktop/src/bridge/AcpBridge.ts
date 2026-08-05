@@ -162,8 +162,21 @@ function isInvalidParamsError(error: unknown): boolean {
 /** API 400 / invalid-argument: Invalid reasoning effort (resume + sticky session). */
 function isInvalidReasoningEffortError(error: unknown): boolean {
   const message = errorText(error);
-  return /invalid\s+reasoning\s+effort/i.test(message)
-    || /invalid-argument[^\n]*reasoning\s*effort/i.test(message);
+  return (
+    /invalid\s+reasoning\s+effort/i.test(message)
+    || /invalid-argument[^\n]*reasoning\s*effort/i.test(message)
+    || /unknown effort level/i.test(message)
+  );
+}
+
+/** True when a turn/stream update carries the invalid-effort API failure. */
+function isInvalidReasoningEffortMessage(message: string | undefined): boolean {
+  if (!message) return false;
+  return (
+    /invalid\s+reasoning\s+effort/i.test(message)
+    || /invalid-argument[^\n]*reasoning\s*effort/i.test(message)
+    || /unknown effort level/i.test(message)
+  );
 }
 
 /** Coerce UI / composer values onto the catalogue (drops garbage after shell upgrades). */
@@ -176,9 +189,12 @@ function normalizeEffort(value: unknown, fallback: Effort = "high"): Effort {
   return fallback;
 }
 
-/** Prefer requested effort, then safer fallbacks for resume / older CLI. */
+/**
+ * Prefer requested effort, then Grok-safe ladder only.
+ * Do not re-try xhigh/max after a failure (they are the usual rejectors).
+ */
 function effortFallbackChain(preferred: Effort): Effort[] {
-  const ordered: Effort[] = [preferred, "high", "medium", "low", "xhigh", "max"];
+  const ordered: Effort[] = [preferred, "high", "medium", "low"];
   const seen = new Set<Effort>();
   const out: Effort[] = [];
   for (const effort of ordered) {
@@ -1055,6 +1071,8 @@ export class AcpBridge implements GrokBridge {
   private canonicalReplaySessions = new Set<string>();
   private usage = new Map<string, Usage>();
   private sessionOptions = new Map<string, PromptOptions>();
+  /** Active session/prompt JSON-RPC id — stream errors can reject it for effort fallback. */
+  private promptRpcBySession = new Map<string, RpcId>();
   private sessionSetModelUnsupported = false;
   private activePromptSessions = new Set<string>();
   private promptDrainWaiters = new Set<() => void>();
@@ -1823,6 +1841,7 @@ export class AcpBridge implements GrokBridge {
         return;
       }
       case "turn_completed":
+        this.rejectPromptOnInvalidEffortUpdate(sessionId, update);
         this.finishTurn(sessionId, record(update.usage));
         return;
       default:
@@ -1970,6 +1989,7 @@ export class AcpBridge implements GrokBridge {
         break;
       }
       case "turn_completed":
+        this.rejectPromptOnInvalidEffortUpdate(sessionId, update);
         this.finishTurn(sessionId, record(update.usage));
         break;
       case "auto_compact_started":
@@ -1995,6 +2015,9 @@ export class AcpBridge implements GrokBridge {
         break;
       case "retry_state": {
         const retry = record(update.retryState) ?? update;
+        // Agent surfaces API 400 Invalid reasoning effort here while session/prompt
+        // may still be pending — reject so prompt() catch can fall back to high.
+        this.rejectPromptOnInvalidEffortUpdate(sessionId, retry);
         this.emit({
           type: "block_add",
           sessionId,
@@ -2073,6 +2096,55 @@ export class AcpBridge implements GrokBridge {
     this.flushToolPatches(sessionId);
     if (usageValue) this.emitUsage(sessionId, usageValue);
     this.emit({ type: "status", sessionId, status });
+  }
+
+  /**
+   * Stream-path Invalid reasoning effort (set_model often accepts max; API 400
+   * arrives as retry_state / turn_completed). Reject the in-flight session/prompt
+   * so prompt() can rebind high→medium→low and continue.
+   */
+  private rejectPromptOnInvalidEffortUpdate(sessionId: string, update: JsonObject): void {
+    const stop = string(update.stop_reason) ?? string(update.stopReason);
+    const message =
+      string(update.agent_result)
+      ?? string(update.message)
+      ?? string(update.error)
+      ?? string(record(update.error)?.message)
+      ?? "";
+    const failed =
+      stop === "error"
+      || string(update.type) === "failed"
+      || string(update.error_type) === "api"
+      || isInvalidReasoningEffortMessage(message);
+    if (!failed || !isInvalidReasoningEffortMessage(message)) return;
+
+    const rpcId = this.promptRpcBySession.get(sessionId);
+    if (rpcId === undefined) return;
+    const pending = this.pending.get(rpcId);
+    if (!pending || pending.method !== ACP_METHODS.sessionPrompt) return;
+    this.pending.delete(rpcId);
+    this.promptRpcBySession.delete(sessionId);
+    if (pending.timeoutId !== undefined) window.clearTimeout(pending.timeoutId);
+    pending.reject(new Error(message || "Invalid reasoning effort"));
+  }
+
+  /** If session/prompt resolves with an error body instead of rejecting. */
+  private throwIfPromptResultInvalidEffort(responseValue: unknown): void {
+    const response = record(responseValue);
+    if (!response) return;
+    const stop = string(response.stop_reason) ?? string(response.stopReason);
+    const message =
+      string(response.agent_result)
+      ?? string(response.message)
+      ?? string(response.error)
+      ?? errorText(response.error)
+      ?? "";
+    if (
+      (stop === "error" || isInvalidReasoningEffortMessage(message))
+      && isInvalidReasoningEffortMessage(message)
+    ) {
+      throw new Error(message || "Invalid reasoning effort");
+    }
   }
 
   private emitUsage(sessionId: string, usageValue: JsonObject) {
@@ -3230,6 +3302,7 @@ export class AcpBridge implements GrokBridge {
           _meta: { reasoningEffort: effort },
         }, 0, (id) => {
           promptRpcId = id;
+          this.promptRpcBySession.set(sessionId, id);
         });
         // session/prompt intentionally has no fixed timeout (long turns stream
         // for many minutes), but a completely silent agent means a wedged
@@ -3242,15 +3315,21 @@ export class AcpBridge implements GrokBridge {
           const pending = this.pending.get(promptRpcId);
           if (!pending) return;
           this.pending.delete(promptRpcId);
+          this.promptRpcBySession.delete(sessionId);
           pending.reject(
             new Error("Grok Agent 长时间没有任何响应：上游服务可能无返回。请检查网络、模型或供应商配置后重试。"),
           );
           this.cancel(sessionId);
         }, 15_000);
         try {
-          return await promptRequest;
+          const result = await promptRequest;
+          this.throwIfPromptResultInvalidEffort(result);
+          return result;
         } finally {
           window.clearInterval(watchdog);
+          if (promptRpcId !== undefined && this.promptRpcBySession.get(sessionId) === promptRpcId) {
+            this.promptRpcBySession.delete(sessionId);
+          }
         }
       };
 
@@ -3260,9 +3339,9 @@ export class AcpBridge implements GrokBridge {
         responseValue = await runPromptOnce(usedEffort);
       } catch (error) {
         if (!isInvalidReasoningEffortError(error)) throw error;
-        // Resume / sticky session: prompt meta rejected — rebind + retry chain.
+        // Stream/API rejected max|xhigh — rebind safe ladder and continue same turn.
         let recovered: unknown;
-        let last = error;
+        let last: unknown = error;
         for (const candidate of effortFallbackChain(preferredEffort)) {
           if (candidate === usedEffort) continue;
           try {
@@ -3276,17 +3355,22 @@ export class AcpBridge implements GrokBridge {
               effort: usedEffort,
               mode: options.mode,
             });
+            // Persist clamp so UI stops advertising a rejected sticky max for this session.
+            try {
+              localStorage.setItem("grok.effort", usedEffort);
+            } catch {
+              /* private mode */
+            }
             recovered = await runPromptOnce(usedEffort);
             last = undefined;
             if (usedEffort !== preferredEffort) {
-              // Informational system line — do not mark the turn failed.
               this.emit({
                 type: "block_add",
                 sessionId,
                 block: {
                   type: "system",
                   id: uid(),
-                  text: `推理强度 ${preferredEffort} 不被当前会话接受，已自动改用 ${usedEffort} 继续。`,
+                  text: `推理强度 ${preferredEffort} 不被当前模型/API 接受，已自动改用 ${usedEffort} 继续。`,
                   ts: Date.now(),
                   kind: "info",
                 },
@@ -3314,6 +3398,7 @@ export class AcpBridge implements GrokBridge {
       }
       this.emit({ type: "error", sessionId, message: errorText(error) });
     } finally {
+      this.promptRpcBySession.delete(sessionId);
       this.finishTurn(sessionId, undefined, terminalStatus);
       this.markPromptFinished(sessionId);
     }
