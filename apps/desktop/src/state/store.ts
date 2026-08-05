@@ -51,6 +51,22 @@ import {
   reconcileIncomingStatus,
   statusAfterGateResolve,
 } from "../lib/sessionGate";
+import {
+  consumeShellUpgradeRescan,
+  sanitizeSessionForOpen,
+  shouldForceOfflineRescan,
+} from "../lib/sessionOpenPolicy";
+import {
+  filterQueueGhostsByLiveText,
+  nextLocalDrainIndex,
+} from "../lib/promptQueue";
+import { nextQueueDrainParked } from "../lib/queueParkPolicy";
+import {
+  isComputerUseOperatorEnabled,
+  setComputerUseHostEnvEnabled,
+  setComputerUseHostPrefsEnabled,
+  setComputerUseOperatorEnabled,
+} from "../lib/computerUse";
 
 export type View = "home" | "session";
 export type InspectorTab = "files" | "tasks" | "preview" | "usage";
@@ -133,6 +149,9 @@ export interface QueuedPrompt {
   mode: AgentMode;
   permissionMode: PermissionMode;
   createdAt: number;
+  source?: "local" | "cli";
+  state?: "queued" | "interjected" | "sending";
+  heldByCli?: boolean;
 }
 
 interface DesktopState {
@@ -183,6 +202,8 @@ interface DesktopState {
   browserUseEnabled: boolean;
   sessionComposers: Record<string, SessionComposerState>;
   promptQueues: Record<string, QueuedPrompt[]>;
+  /** UI mirror of suppressNextIdleDrain (Stop parks auto-drain). */
+  queueDrainParked: Record<string, boolean>;
   /** Model choices made during a turn, applied only when that turn settles. */
   pendingSessionModels: Record<string, string>;
 
@@ -276,6 +297,9 @@ interface DesktopState {
 
 const uid = () => crypto.randomUUID();
 const suppressedQueueDrain = new Set<string>();
+/** Upgrade generation: force background load once per session after shell bump. */
+let upgradeForceOfflineRescan = false;
+const upgradeForceRescanned = new Set<string>();
 const SESSION_COMPOSERS_KEY = "grox.sessionComposers.v1";
 const WORKFLOW_RUNS_KEY = "grox.workflowRuns.v1";
 let catalogPersistTimer: number | undefined;
@@ -574,7 +598,16 @@ export const useDesktop = create<DesktopState>((set, get) => {
   const drainPromptQueue = (sessionId: string) => {
     const state = get();
     const session = state.sessions[sessionId];
-    const queue = state.promptQueues[sessionId] ?? [];
+    let queue = state.promptQueues[sessionId] ?? [];
+    // Ghost filter: drop rows whose text already matches last primary user.
+    const lastUser = [...session?.blocks ?? []].reverse().find(
+      (b) => b.type === "user" && !("interjected" in b && b.interjected),
+    );
+    const liveText = lastUser && lastUser.type === "user" ? lastUser.text : null;
+    queue = filterQueueGhostsByLiveText(queue, liveText);
+    if (queue.length !== (state.promptQueues[sessionId] ?? []).length) {
+      set({ promptQueues: { ...state.promptQueues, [sessionId]: queue } });
+    }
     if (!session || !shouldDrainLocalQueue({
       status: session.status,
       providerSwitching: state.providerSwitching,
@@ -583,7 +616,16 @@ export const useDesktop = create<DesktopState>((set, get) => {
       queueLength: queue.length,
     })) return;
 
-    const [next, ...rest] = queue;
+    const drainAt = nextLocalDrainIndex(
+      queue.map((item) => ({
+        ...item,
+        state: item.state ?? ("queued" as const),
+        source: item.source ?? ("local" as const),
+      })),
+    );
+    if (drainAt < 0) return;
+    const next = queue[drainAt];
+    const rest = [...queue.slice(0, drainAt), ...queue.slice(drainAt + 1)];
     const currentComposer = state.sessionComposers[sessionId] ?? {
       text: "", attachments: [], model: state.model, effort: state.effort,
       mode: state.mode, permissionMode: state.permissionMode,
@@ -1096,11 +1138,12 @@ export const useDesktop = create<DesktopState>((set, get) => {
     effort: EFFORTS.find((effort) => effort === localStorage.getItem("grok.effort")) ?? "high",
     mode: "agent",
     permissionMode: readStoredPermissionMode(localStorage.getItem("grok.permissionMode")),
-    computerUseEnabled: localStorage.getItem("grox.computerUseEnabled") !== "0",
+    computerUseEnabled: isComputerUseOperatorEnabled(),
     browserUseEnabled: localStorage.getItem("grox.browserUseEnabled") !== "0",
     sessionComposers: loadSessionComposers(),
     promptQueues: {},
     pendingSessionModels: {},
+    queueDrainParked: {} as Record<string, boolean>,
 
     inspectorOpen: false,
     inspectorTab: "files",
@@ -1120,8 +1163,23 @@ export const useDesktop = create<DesktopState>((set, get) => {
         const runtime = bridge.kind === "acp"
           ? await invoke<GrokRuntimeInfo>("grok_runtime_info")
           : null;
+        // Host-attested CU: migrate FE once, then host_prefs is authority.
+        const feCu = localStorage.getItem("grox.computerUseEnabled") !== "0";
+        await invoke("host_prefs_migrate_computer_use", { feEnabled: feCu }).catch(() => {});
+        const hostPrefs = await invoke<{ computerUseEnabled?: boolean }>("host_prefs_get").catch(() => null);
+        if (hostPrefs && typeof hostPrefs.computerUseEnabled === "boolean") {
+          setComputerUseHostPrefsEnabled(hostPrefs.computerUseEnabled);
+        }
+        const envOn = await invoke<boolean>("computer_use_env_enabled").catch(() => false);
+        setComputerUseHostEnvEnabled(Boolean(envOn));
+        const env = await invoke<{ appVersion?: string }>("desktop_environment").catch(() => null);
+        if (env?.appVersion && consumeShellUpgradeRescan(env.appVersion)) {
+          upgradeForceOfflineRescan = true;
+          upgradeForceRescanned.clear();
+        }
         set({
           runtime,
+          computerUseEnabled: isComputerUseOperatorEnabled(),
           accountSetupOpen: get().accountSetupOpen || Boolean(runtime?.selectionRequired),
         });
         const workspace = await bridge.getWorkspace();
@@ -1210,15 +1268,25 @@ export const useDesktop = create<DesktopState>((set, get) => {
           permissionMode: composer.permissionMode,
         } : {}),
       });
+      const forceRescan = shouldForceOfflineRescan({
+        upgradeRescanActive: upgradeForceOfflineRescan,
+        sessionAlreadyForceRescanned: upgradeForceRescanned.has(id),
+      });
       if (!existing) {
         void loadSessionCache(id).then((cached) => {
           if (!cached) return;
           const latest = get();
           if (latest.sessions[id]) return;
-          set({ sessions: { ...latest.sessions, [id]: cached } });
+          const painted = {
+            ...cached,
+            ...sanitizeSessionForOpen(cached),
+          };
+          set({ sessions: { ...latest.sessions, [id]: painted } });
         });
       }
-      if (!existing || existing.preview) {
+      // Upgrade generation: always re-bind full history once per session.
+      if (!existing || existing.preview || forceRescan) {
+        if (forceRescan) upgradeForceRescanned.add(id);
         void bridge.loadSession(id, { background: true }).catch((error) => {
           set({ startupError: `会话后台同步失败：${error instanceof Error ? error.message : String(error)}` });
         });
@@ -1870,6 +1938,11 @@ export const useDesktop = create<DesktopState>((set, get) => {
         return true;
       }
       suppressedQueueDrain.delete(session.id);
+      if (get().queueDrainParked[session.id]) {
+        set({
+          queueDrainParked: nextQueueDrainParked(get().queueDrainParked, session.id, false),
+        });
+      }
       const internalWorkflowControl = /^\/workflow\s+(?:pause|resume|stop)\s+\S+(?:\s|$)/i.test(trimmed);
       const titleText = trimmed || attachments.map((attachment) => attachment.name).join(", ");
       const nextIndex = get().sessionIndex.map((m) =>
@@ -1991,9 +2064,10 @@ export const useDesktop = create<DesktopState>((set, get) => {
     },
 
     stop() {
-      const { activeId } = get();
+      const { activeId, queueDrainParked } = get();
       if (activeId) {
         suppressedQueueDrain.add(activeId);
+        set({ queueDrainParked: nextQueueDrainParked(queueDrainParked, activeId, true) });
         bridge.cancel(activeId);
       }
     },
@@ -2140,6 +2214,7 @@ export const useDesktop = create<DesktopState>((set, get) => {
         }
       }
       localStorage.setItem("grok.permissionMode", permissionMode);
+      void invoke("host_prefs_set_permission_mode", { mode: permissionMode }).catch(() => {});
       bridge.setPermissionMode(permissionMode);
       if (!activeId) return set({ permissionMode });
       const current = sessionComposers[activeId] ?? { text: "", attachments: [], model, effort, mode, permissionMode };
@@ -2152,10 +2227,13 @@ export const useDesktop = create<DesktopState>((set, get) => {
       if (enabled && permissionMode === "bypass") {
         localStorage.setItem("grok.permissionMode", "default");
         bridge.setPermissionMode("default");
+        void invoke("host_prefs_set_permission_mode", { mode: "default" }).catch(() => {});
         set({ permissionMode: "default" });
       }
+      setComputerUseOperatorEnabled(enabled);
+      void invoke("host_prefs_set_computer_use", { enabled }).catch(() => {});
       bridge.setComputerUseEnabled(enabled);
-      set({ computerUseEnabled: enabled });
+      set({ computerUseEnabled: isComputerUseOperatorEnabled() });
     },
     setBrowserUseEnabled(enabled) {
       bridge.setBrowserUseEnabled(enabled);

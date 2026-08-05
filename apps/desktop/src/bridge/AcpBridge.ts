@@ -93,6 +93,7 @@ interface JsonRpcMessage extends JsonObject {
 interface DesktopEnvironment {
   defaultWorkspace: string;
   grokCommand: string;
+  appVersion?: string;
 }
 
 interface ExitPayload {

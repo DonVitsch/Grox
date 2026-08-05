@@ -9,6 +9,7 @@
 mod browser_mcp;
 mod computer_mcp;
 mod git_confirm;
+mod host_prefs;
 mod mcp_leases;
 mod path_sandbox;
 #[cfg(windows)]
@@ -134,6 +135,7 @@ struct AcpExitPayload {
 struct DesktopEnvironment {
     default_workspace: String,
     grok_command: String,
+    app_version: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -2135,12 +2137,86 @@ async fn terminate_process(mut process: AgentProcess) {
     let _ = process.child.wait().await;
 }
 
+fn host_prefs_dir_for_app(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| default_workspace().join(".grox-host-prefs-fallback"))
+}
+
+/// Product gate: env OR host_prefs only (ignore FE for actual attach).
+fn computer_use_gate_open() -> bool {
+    if let Ok(v) = std::env::var("GROX_COMPUTER_USE") {
+        let t = v.trim();
+        if t == "1" || t.eq_ignore_ascii_case("true") {
+            return true;
+        }
+        if t == "0" || t.eq_ignore_ascii_case("false") {
+            return false;
+        }
+    }
+    host_prefs::is_computer_use_enabled()
+}
+
+#[tauri::command]
+fn computer_use_env_enabled() -> bool {
+    std::env::var("GROX_COMPUTER_USE")
+        .ok()
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn host_prefs_get(app: tauri::AppHandle) -> host_prefs::HostPrefs {
+    host_prefs::load_prefs(&host_prefs_dir_for_app(&app))
+}
+
+#[tauri::command]
+fn host_prefs_migrate_computer_use(
+    app: tauri::AppHandle,
+    fe_enabled: bool,
+) -> Result<host_prefs::HostPrefs, String> {
+    host_prefs::migrate_computer_use_from_fe(&host_prefs_dir_for_app(&app), fe_enabled)
+}
+
+#[tauri::command]
+fn host_prefs_set_computer_use(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<host_prefs::HostPrefs, String> {
+    let dir = host_prefs_dir_for_app(&app);
+    let mut prefs = host_prefs::load_prefs(&dir);
+    prefs.computer_use_enabled = enabled;
+    prefs.computer_use_fe_migrated = true;
+    host_prefs::save_prefs(&dir, &prefs)?;
+    Ok(prefs)
+}
+
+#[tauri::command]
+fn host_prefs_set_permission_mode(
+    app: tauri::AppHandle,
+    mode: String,
+) -> Result<host_prefs::HostPrefs, String> {
+    let mode = host_prefs::normalize_permission_mode(&mode)
+        .ok_or_else(|| "无效的权限模式".to_string())?;
+    let dir = host_prefs_dir_for_app(&app);
+    let mut prefs = host_prefs::load_prefs(&dir);
+    prefs.permission_mode = mode.to_string();
+    host_prefs::save_prefs(&dir, &prefs)?;
+    Ok(prefs)
+}
+
 #[tauri::command]
 fn desktop_environment(app: tauri::AppHandle) -> DesktopEnvironment {
     let runtime = configured_grok_command(&app);
+    // Warm host prefs cache at first environment probe.
+    let _ = host_prefs::load_prefs(&host_prefs_dir_for_app(&app));
     DesktopEnvironment {
         default_workspace: path_for_webview(&default_workspace()),
         grok_command: path_for_webview(Path::new(&runtime.path)),
+        app_version: CLIENT_VERSION.to_string(),
     }
 }
 
@@ -5129,6 +5205,14 @@ Use only the grox_desktop_computer MCP tools for an explicit `/computer` or `@Co
 fn computer_session_extensions(
     leases: tauri::State<'_, Arc<McpLeaseStore>>,
 ) -> Result<ComputerSessionExtensions, String> {
+    // Soft-fail when host gate closed: empty lists, no lease (FE must not cache control).
+    if !computer_use_gate_open() {
+        return Ok(ComputerSessionExtensions {
+            mcp_servers: Vec::new(),
+            plugin_dirs: Vec::new(),
+            lease_id: String::new(),
+        });
+    }
     let mut lease_bytes = [0_u8; 16];
     getrandom::fill(&mut lease_bytes)
         .map_err(|error| format!("无法创建 Computer Use 租约：{error}"))?;
@@ -5523,10 +5607,9 @@ async fn acp_spawn(
     }
 
     let runtime = configured_grok_command(&app);
-    // Only expose the Computer Use Skill when the desktop toggle is on; the
-    // MCP endpoint is gated separately, but SKILL.md stays visible via
-    // --plugin-dir unless we skip it here.
-    let computer_plugin = if computer_use_enabled.unwrap_or(false) {
+    // Host gate only (env | host_prefs). FE `computer_use_enabled` is not authority.
+    let _ = computer_use_enabled;
+    let computer_plugin = if computer_use_gate_open() {
         Some(
             ensure_computer_plugin()
                 .map_err(|error| format!("Computer Use Plugin 初始化失败：{error}"))?,
@@ -6330,6 +6413,11 @@ fn main() {
             open_external,
             open_media_external,
             start_project_preview,
+            computer_use_env_enabled,
+            host_prefs_get,
+            host_prefs_migrate_computer_use,
+            host_prefs_set_computer_use,
+            host_prefs_set_permission_mode,
             computer_session_extensions,
             computer_shutdown_lease,
             computer_emergency_stop,
