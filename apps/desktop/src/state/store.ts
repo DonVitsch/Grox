@@ -45,6 +45,12 @@ import { DEMO_CWD } from "../demo/data";
 import { loadSessionCache, removeSessionCache, scheduleSaveSessionCache } from "../lib/sessionCache";
 import { readStoredPermissionMode } from "../lib/permissionMode";
 import { shouldDrainLocalQueue } from "../lib/queueTurnPolicy";
+import { mergeProjectSessionsPure } from "../lib/sessionCatalogMerge";
+import { isLiveBusyStatus, mergeOfflineWithLive } from "../lib/offlineMerge";
+import {
+  reconcileIncomingStatus,
+  statusAfterGateResolve,
+} from "../lib/sessionGate";
 
 export type View = "home" | "session";
 export type InspectorTab = "files" | "tasks" | "preview" | "usage";
@@ -398,15 +404,23 @@ function mergeSessions(
   incoming: SessionMeta[],
   cwd?: string,
 ): SessionMeta[] {
-  const incomingIds = new Set(incoming.map((meta) => meta.id));
-  const merged = [
-    ...decorateSessions(incoming),
-    ...existing.filter(
-      (meta) =>
-        !incomingIds.has(meta.id) &&
-        (cwd === undefined || !samePath(meta.cwd, cwd)),
-    ),
-  ].sort((a, b) => b.updatedAt - a.updatedAt);
+  // When scoped to a cwd (project open / setWorkspace), keep same-cwd offline
+  // catalog rows the CLI did not return — otherwise "project +" hides history.
+  const merged = cwd
+    ? (mergeProjectSessionsPure(
+        existing,
+        samePath,
+        cwd,
+        decorateSessions(incoming),
+        new Set(),
+      ) as SessionMeta[])
+    : (() => {
+        const incomingIds = new Set(incoming.map((meta) => meta.id));
+        return [
+          ...decorateSessions(incoming),
+          ...existing.filter((meta) => !incomingIds.has(meta.id)),
+        ].sort((a, b) => b.updatedAt - a.updatedAt);
+      })();
   persistSessionCatalog(merged);
   return merged;
 }
@@ -768,8 +782,22 @@ export const useDesktop = create<DesktopState>((set, get) => {
         const localPreviewSuffix = e.background && !e.preview && existing?.preview
           ? existing.blocks.filter((block) => !block.id.startsWith(`preview-${filteredSession.id}-`))
           : [];
+        // Idle background load: offline/ACP spine + live-only insert (order fix).
+        // Busy sessions keep live blocks untouched.
+        let spineMerged: Session | null = null;
+        if (
+          e.background &&
+          !e.preview &&
+          existing &&
+          !isLiveBusyStatus(existing.status) &&
+          !isLiveBusyStatus(filteredSession.status)
+        ) {
+          spineMerged = mergeOfflineWithLive(filteredSession, existing);
+        }
         const readySession = e.preview && existing
           ? existing
+          : spineMerged
+            ? spineMerged
           : localPreviewSuffix.length > 0
             ? {
                 ...filteredSession,
@@ -916,15 +944,18 @@ export const useDesktop = create<DesktopState>((set, get) => {
         );
         break;
       case "permission_resolved":
-        withSession(e.sessionId, (s) => ({
-          ...s,
-          status: "running",
-          blocks: s.blocks.map((b) =>
+        withSession(e.sessionId, (s) => {
+          const blocks = s.blocks.map((b) =>
             b.id === e.blockId && b.type === "permission"
               ? { ...b, resolved: e.option }
               : b,
-          ),
-        }));
+          );
+          return {
+            ...s,
+            status: statusAfterGateResolve(blocks, s.status),
+            blocks,
+          };
+        });
         break;
       case "question_request":
         withSession(e.sessionId, (s) => ({
@@ -941,20 +972,26 @@ export const useDesktop = create<DesktopState>((set, get) => {
         );
         break;
       case "question_resolved":
-        withSession(e.sessionId, (s) => ({
-          ...s,
-          status: "running",
-          blocks: s.blocks.map((b) =>
+        withSession(e.sessionId, (s) => {
+          const blocks = s.blocks.map((b) =>
             b.id === e.blockId && b.type === "question"
               ? { ...b, response: e.response }
               : b,
-          ),
-        }));
+          );
+          return {
+            ...s,
+            status: statusAfterGateResolve(blocks, s.status),
+            blocks,
+          };
+        });
         break;
       case "status":
         withSession(
           e.sessionId,
-          (s) => ({ ...s, status: e.status }),
+          (s) => ({
+            ...s,
+            status: reconcileIncomingStatus(s.blocks, s.status, e.status),
+          }),
           true,
           e.status === "idle" ? get().activeId !== e.sessionId : e.status === "running" ? false : undefined,
         );
