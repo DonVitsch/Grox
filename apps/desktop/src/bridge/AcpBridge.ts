@@ -159,6 +159,36 @@ function isInvalidParamsError(error: unknown): boolean {
   return error instanceof Error && /\binvalid params\b/i.test(error.message);
 }
 
+/** API 400 / invalid-argument: Invalid reasoning effort (resume + sticky session). */
+function isInvalidReasoningEffortError(error: unknown): boolean {
+  const message = errorText(error);
+  return /invalid\s+reasoning\s+effort/i.test(message)
+    || /invalid-argument[^\n]*reasoning\s*effort/i.test(message);
+}
+
+/** Coerce UI / composer values onto the catalogue (drops garbage after shell upgrades). */
+function normalizeEffort(value: unknown, fallback: Effort = "high"): Effort {
+  if (typeof value === "string") {
+    const lowered = value.trim().toLowerCase();
+    const hit = EFFORTS.find((effort) => effort === lowered);
+    if (hit) return hit;
+  }
+  return fallback;
+}
+
+/** Prefer requested effort, then safer fallbacks for resume / older CLI. */
+function effortFallbackChain(preferred: Effort): Effort[] {
+  const ordered: Effort[] = [preferred, "high", "medium", "low", "xhigh", "max"];
+  const seen = new Set<Effort>();
+  const out: Effort[] = [];
+  for (const effort of ordered) {
+    if (seen.has(effort)) continue;
+    seen.add(effort);
+    out.push(effort);
+  }
+  return out;
+}
+
 function isMethodUnavailable(error: unknown): boolean {
   return error instanceof AcpRpcError && (error.code === -32601 || error.code === -32602);
 }
@@ -2884,6 +2914,9 @@ export class AcpBridge implements GrokBridge {
       };
       this.replaying.delete(id);
       this.knownSessions.add(id);
+      // Drop sticky model/effort so the next prompt re-binds via set_model
+      // (resume after shell upgrade / effort change must not reuse dead options).
+      this.sessionOptions.delete(id);
       this.emit({ type: "session_ready", session: finalized, background });
       this.emit({ type: "available_commands", sessionId: id, commands: this.runtimeCommands });
       // Restored workflow actors emit a current snapshot, but older CLI
@@ -3103,6 +3136,46 @@ export class AcpBridge implements GrokBridge {
     }
   }
 
+  /**
+   * Bind model + reasoning effort on the ACP session.
+   * Effort changes must re-call set_model (resume sticky sessions).
+   * Invalid effort falls through the fallback chain instead of latching
+   * `sessionSetModelUnsupported` forever.
+   */
+  private async applySessionModelAndEffort(
+    sessionId: string,
+    modelId: string,
+    effort: Effort,
+  ): Promise<Effort> {
+    const preferred = normalizeEffort(effort);
+    if (this.sessionSetModelUnsupported) return preferred;
+
+    let lastError: unknown;
+    for (const candidate of effortFallbackChain(preferred)) {
+      try {
+        await this.requestRaw(ACP_METHODS.sessionSetModel, {
+          sessionId,
+          modelId,
+          _meta: { reasoningEffort: candidate },
+        });
+        return candidate;
+      } catch (error) {
+        lastError = error;
+        if (isInvalidReasoningEffortError(error)) {
+          continue;
+        }
+        if (isInvalidParamsError(error)) {
+          // True capability miss: do not spam set_model every turn.
+          this.sessionSetModelUnsupported = true;
+          return preferred;
+        }
+        throw error;
+      }
+    }
+    if (lastError) throw lastError;
+    return preferred;
+  }
+
   async prompt(sessionId: string, text: string, options: PromptOptions): Promise<void> {
     // Register before any await. This is the critical Send → provider-switch
     // race: provider activation must see this request immediately.
@@ -3122,27 +3195,19 @@ export class AcpBridge implements GrokBridge {
       this.closeUser(sessionId);
       this.emit({ type: "status", sessionId, status: "running" });
 
+      const preferredEffort = normalizeEffort(options.effort);
       const previous = this.sessionOptions.get(sessionId);
+      let boundEffort = preferredEffort;
       if (
-        !this.sessionSetModelUnsupported
-        && (!previous || previous.model !== options.model)
+        !previous
+        || previous.model !== options.model
+        || previous.effort !== preferredEffort
       ) {
-        try {
-          await this.requestRaw(ACP_METHODS.sessionSetModel, {
-            sessionId,
-            modelId: options.model,
-            _meta: { reasoningEffort: options.effort },
-          });
-        } catch (error) {
-          if (!isInvalidParamsError(error)) throw error;
-          // Older Grok CLI builds and some compatible-provider adapters expose
-          // model metadata but reject ACP session/set_model. The provider's
-          // resident model is already selected at process startup, so continue
-          // the prompt instead of turning a harmless capability mismatch into
-          // a failed first message. Remember this for the lifetime of the child
-          // process to avoid repeating the same rejected RPC every turn.
-          this.sessionSetModelUnsupported = true;
-        }
+        boundEffort = await this.applySessionModelAndEffort(
+          sessionId,
+          options.model,
+          preferredEffort,
+        );
       }
       if (!previous || previous.mode !== options.mode) {
         await this.requestRaw(ACP_METHODS.sessionSetMode, {
@@ -3152,40 +3217,89 @@ export class AcpBridge implements GrokBridge {
       }
       this.sessionOptions.set(sessionId, {
         model: options.model,
-        effort: options.effort,
+        effort: boundEffort,
         mode: options.mode,
       });
 
       const dispatchText = completeDeepResearchPrompt(text);
-      let promptRpcId: RpcId | undefined;
-      const promptRequest = this.requestRaw(ACP_METHODS.sessionPrompt, {
-        sessionId,
-        prompt: promptContent(dispatchText, options.attachments ?? []),
-        _meta: { reasoningEffort: options.effort },
-      }, 0, (id) => {
-        promptRpcId = id;
-      });
-      // session/prompt intentionally has no fixed timeout (long turns stream
-      // for many minutes), but a completely silent agent means a wedged
-      // upstream gateway or a dead socket — surface that instead of leaving
-      // the session spinning forever.
-      this.lastActivity.set(sessionId, Date.now());
-      const watchdog = window.setInterval(() => {
-        const silentFor = Date.now() - (this.lastActivity.get(sessionId) ?? 0);
-        if (silentFor <= PROMPT_STALL_MS || promptRpcId === undefined) return;
-        const pending = this.pending.get(promptRpcId);
-        if (!pending) return;
-        this.pending.delete(promptRpcId);
-        pending.reject(
-          new Error("Grok Agent 长时间没有任何响应：上游服务可能无返回。请检查网络、模型或供应商配置后重试。"),
-        );
-        this.cancel(sessionId);
-      }, 15_000);
+      const runPromptOnce = async (effort: Effort) => {
+        let promptRpcId: RpcId | undefined;
+        const promptRequest = this.requestRaw(ACP_METHODS.sessionPrompt, {
+          sessionId,
+          prompt: promptContent(dispatchText, options.attachments ?? []),
+          _meta: { reasoningEffort: effort },
+        }, 0, (id) => {
+          promptRpcId = id;
+        });
+        // session/prompt intentionally has no fixed timeout (long turns stream
+        // for many minutes), but a completely silent agent means a wedged
+        // upstream gateway or a dead socket — surface that instead of leaving
+        // the session spinning forever.
+        this.lastActivity.set(sessionId, Date.now());
+        const watchdog = window.setInterval(() => {
+          const silentFor = Date.now() - (this.lastActivity.get(sessionId) ?? 0);
+          if (silentFor <= PROMPT_STALL_MS || promptRpcId === undefined) return;
+          const pending = this.pending.get(promptRpcId);
+          if (!pending) return;
+          this.pending.delete(promptRpcId);
+          pending.reject(
+            new Error("Grok Agent 长时间没有任何响应：上游服务可能无返回。请检查网络、模型或供应商配置后重试。"),
+          );
+          this.cancel(sessionId);
+        }, 15_000);
+        try {
+          return await promptRequest;
+        } finally {
+          window.clearInterval(watchdog);
+        }
+      };
+
       let responseValue: unknown;
+      let usedEffort = boundEffort;
       try {
-        responseValue = await promptRequest;
-      } finally {
-        window.clearInterval(watchdog);
+        responseValue = await runPromptOnce(usedEffort);
+      } catch (error) {
+        if (!isInvalidReasoningEffortError(error)) throw error;
+        // Resume / sticky session: prompt meta rejected — rebind + retry chain.
+        let recovered: unknown;
+        let last = error;
+        for (const candidate of effortFallbackChain(preferredEffort)) {
+          if (candidate === usedEffort) continue;
+          try {
+            usedEffort = await this.applySessionModelAndEffort(
+              sessionId,
+              options.model,
+              candidate,
+            );
+            this.sessionOptions.set(sessionId, {
+              model: options.model,
+              effort: usedEffort,
+              mode: options.mode,
+            });
+            recovered = await runPromptOnce(usedEffort);
+            last = undefined;
+            if (usedEffort !== preferredEffort) {
+              // Informational system line — do not mark the turn failed.
+              this.emit({
+                type: "block_add",
+                sessionId,
+                block: {
+                  type: "system",
+                  id: uid(),
+                  text: `推理强度 ${preferredEffort} 不被当前会话接受，已自动改用 ${usedEffort} 继续。`,
+                  ts: Date.now(),
+                  kind: "info",
+                },
+              });
+            }
+            break;
+          } catch (retryError) {
+            last = retryError;
+            if (!isInvalidReasoningEffortError(retryError)) throw retryError;
+          }
+        }
+        if (last) throw last;
+        responseValue = recovered;
       }
       const response = record(responseValue);
       const meta = record(response?._meta);
@@ -3194,6 +3308,10 @@ export class AcpBridge implements GrokBridge {
       await this.refreshSessionInfo(sessionId);
     } catch (error) {
       terminalStatus = "failed";
+      if (isInvalidReasoningEffortError(error)) {
+        // Force next send to re-run set_model + fallback chain.
+        this.sessionOptions.delete(sessionId);
+      }
       this.emit({ type: "error", sessionId, message: errorText(error) });
     } finally {
       this.finishTurn(sessionId, undefined, terminalStatus);
