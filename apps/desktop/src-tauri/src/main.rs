@@ -5786,7 +5786,10 @@ fn acp_method_allowed(method: &str) -> bool {
     {
         return false;
     }
-    let m = method.strip_prefix('_').unwrap_or(method);
+    // Only x.ai extension notifications use the optional wire-level `_` prefix.
+    // Do not let the prefix turn arbitrary standard namespaces into aliases.
+    let m = method.strip_prefix("_x.ai/").map(|suffix| format!("x.ai/{suffix}"));
+    let m = m.as_deref().unwrap_or(method);
     matches!(
         m,
         "session/new"
@@ -5795,6 +5798,7 @@ fn acp_method_allowed(method: &str) -> bool {
             | "session/cancel"
             | "session/delete"
             | "session/set_config_option"
+            | "session/set_model"
             | "session/setMode"
             | "session/set_mode"
             | "session/info"
@@ -5829,10 +5833,7 @@ fn acp_method_allowed(method: &str) -> bool {
             | "x.ai/mcp/status"
             | "x.ai/yolo_mode_changed"
             | "x.ai/queue/changed"
-    ) || m.starts_with("session/")
-        || m.starts_with("x.ai/")
-        || m.starts_with("terminal/")
-        || m.starts_with("fs/")
+    ) || m.starts_with("x.ai/")
 }
 
 #[tauri::command]
@@ -7206,9 +7207,16 @@ UNRELATED=value
         assert!(acp_method_allowed("_x.ai/yolo_mode_changed"));
         assert!(acp_method_allowed("x.ai/yolo_mode_changed"));
         assert!(acp_method_allowed("session/prompt"));
+        assert!(acp_method_allowed("session/set_model"));
         assert!(!acp_method_allowed("shell/exec"));
         assert!(!acp_method_allowed("eval"));
         assert!(!acp_method_allowed("_evil/hack"));
+        assert!(!acp_method_allowed("_session/prompt"));
+        assert!(!acp_method_allowed("session/unknown"));
+        assert!(!acp_method_allowed("terminal/unknown"));
+        assert!(!acp_method_allowed("fs/unknown"));
+        assert!(acp_method_allowed("x.ai/future_extension"));
+        assert!(acp_method_allowed("_x.ai/future_extension"));
         assert!(!acp_method_allowed("session/../../evil"));
     }
 
