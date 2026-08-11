@@ -18,7 +18,7 @@ jobs:
       - name: Test the upstream tracker
         run: node --test scripts/upstream-tracker.test.mjs
 
-      - name: Track every change until verified integration
+      - name: Track official releases until verified integration
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/upstream-tracker.mjs
