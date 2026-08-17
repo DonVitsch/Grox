@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Create or update GitHub release notes
         shell: pwsh
@@ -60,6 +60,10 @@ jobs:
             platform: windows-latest
             args: ""
             rustTarget: x86_64-pc-windows-msvc
+          - name: Linux x64
+            platform: ubuntu-22.04
+            args: ""
+            rustTarget: x86_64-unknown-linux-gnu
           - name: macOS Apple Silicon
             platform: macos-latest
             args: "--target aarch64-apple-darwin"
@@ -73,7 +77,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
@@ -97,6 +101,16 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri -> target
 
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
@@ -116,3 +130,41 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload Windows portable archive
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $binary = "apps/desktop/src-tauri/target/release/grox-desktop.exe"
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw "Portable binary not found: $binary"
+          }
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $staging = Join-Path $env:RUNNER_TEMP "Grox-portable"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $staging "Grox.exe")
+          Copy-Item -LiteralPath "LICENSE" -Destination $staging
+          Copy-Item -LiteralPath "THIRD-PARTY-NOTICES" -Destination $staging
+          $archive = Join-Path $env:RUNNER_TEMP "Grox_${version}_windows_x64_portable.zip"
+          Compress-Archive -Path "$staging/*" -DestinationPath $archive -Force
+          gh release upload $env:GITHUB_REF_NAME $archive --clobber
+
+  finalize-release:
+    name: Publish checksums
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Generate and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir release-assets
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir release-assets
+          find release-assets -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z \
+            | xargs -0 -I{} sh -c 'sha256sum "release-assets/$1"' _ {} \
+            | sed 's#release-assets/##' > SHA256SUMS
+          test -s SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
