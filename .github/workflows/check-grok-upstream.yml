@@ -9,6 +9,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: check-grok-upstream
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: windows-latest
