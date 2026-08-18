@@ -3015,7 +3015,8 @@ fn apply_grox_provider_environment(command: &mut Command) -> Result<(), String> 
                 command.env(key, value);
             }
             let profiles = read_provider_profiles_file()?;
-            let reference = profiles.compatible_secret_reference(&values)?;
+            let reference =
+                profiles.compatible_secret_reference(&values, normalize_provider_endpoint)?;
             Some(require_provider_secret(&reference)?)
         }
         _ => return Err(format!("未知的 Host 供应商模式：{kind}")),
@@ -3269,6 +3270,13 @@ fn checked_service_url_with_policy(
 
 fn checked_service_url(value: &str, label: &str) -> Result<String, String> {
     checked_service_url_with_policy(value, label, false)
+}
+
+fn normalize_provider_endpoint(
+    value: &str,
+    allow_insecure_http: bool,
+) -> Result<String, String> {
+    checked_service_url_with_policy(value, "服务地址", allow_insecure_http)
 }
 
 fn checked_api_key(value: &str) -> Result<&str, String> {
@@ -6976,9 +6984,7 @@ fn read_provider_profiles_file() -> Result<ProviderProfilesFile, String> {
         &managed,
         |candidate| read_bounded_text(candidate, MAX_CONFIG_BYTES),
         atomic_create_private,
-        |value, allow_insecure_http| {
-            checked_service_url_with_policy(value, "服务地址", allow_insecure_http)
-        },
+        normalize_provider_endpoint,
     )
 }
 
@@ -7020,7 +7026,8 @@ fn migrate_legacy_provider_secrets() -> Result<(), String> {
         .get(GROK_MODELS_BASE_URL_KEY)
         .filter(|value| !value.trim().is_empty());
     let (reference, kind, profile_id) = if let Some(base_url) = base_url {
-        let active = profiles.legacy_active_profile_for_endpoint(base_url);
+        let active =
+            profiles.legacy_active_profile_for_endpoint(base_url, normalize_provider_endpoint);
         (
             active
                 .map(|profile| provider_profile_secret_ref(profile.id()))
@@ -7455,7 +7462,9 @@ fn active_profile_for_managed_environment(
     value: &ProviderProfilesFile,
 ) -> Option<StoredProviderProfile> {
     let managed = parse_grox_managed_provider_env(&grok_home().ok()?.join(".env"));
-    value.profile_for_managed_values(&managed).cloned()
+    value
+        .profile_for_managed_values(&managed, normalize_provider_endpoint)
+        .cloned()
 }
 
 fn synchronize_active_provider_backend() -> Result<(), String> {
@@ -7589,7 +7598,7 @@ fn save_provider_profile(
     )
     .allow_insecure_http(request.allow_insecure_http)
     .resident_models(resident_models);
-    value.upsert_profile(update, secret_changed);
+    value.upsert_profile(update, secret_changed, normalize_provider_endpoint);
     if secret_changed {
         store
             .set(&reference, key)
@@ -7954,7 +7963,7 @@ fn read_provider_status() -> Result<ProviderStatus, HostError> {
                 let profiles = read_provider_profiles_file().map_err(|error| {
                     provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error)
                 })?;
-                Some(profiles.compatible_secret_reference(&values).map_err(|error| {
+                Some(profiles.compatible_secret_reference(&values, normalize_provider_endpoint).map_err(|error| {
                     HostError::protocol_with_action(
                         "PROVIDER_PROFILE_REFERENCE_INVALID",
                         error,
@@ -11521,6 +11530,71 @@ UNRELATED=value
             Some(&"https://gateway.example/v1".to_string())
         );
         assert!(!values.contains_key("UNRELATED"));
+    }
+
+    #[test]
+    fn production_provider_recovery_publisher_is_race_safe() {
+        let root = std::env::temp_dir().join(format!(
+            "grox-provider-production-recovery-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let primary = root.join("grox-providers.json");
+        let backup = root.join("grox-providers.corrupt-100.bak");
+        fs::write(
+            &backup,
+            serde_json::json!({
+                "activeId": "provider-race",
+                "profiles": [{
+                    "id": "provider-race",
+                    "name": "Race",
+                    "baseUrl": "https://gateway.example/v1",
+                    "allowInsecureHttp": false,
+                    "apiBackend": "chat_completions",
+                    "availableModels": ["grok-build"],
+                    "residentModels": ["grok-build"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let managed = BTreeMap::from([
+            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
+            (GROX_PROVIDER_PROFILE_ID_KEY.into(), "provider-race".into()),
+            (
+                GROK_MODELS_BASE_URL_KEY.into(),
+                "https://gateway.example/v1/".into(),
+            ),
+        ]);
+
+        let readers = (0..2)
+            .map(|_| {
+                let primary = primary.clone();
+                let managed = managed.clone();
+                std::thread::spawn(move || {
+                    ProviderProfilesFile::read_with_recovery(
+                        &primary,
+                        &managed,
+                        |candidate| read_bounded_text(candidate, MAX_CONFIG_BYTES),
+                        atomic_create_private,
+                        normalize_provider_endpoint,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            let profiles = reader.join().unwrap().unwrap();
+            assert!(profiles.profile("provider-race").is_some());
+        }
+        let persisted = read_bounded_text(&primary, MAX_CONFIG_BYTES).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(parsed["profiles"][0]["id"], "provider-race");
+        assert!(backup.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

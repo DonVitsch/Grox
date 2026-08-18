@@ -97,8 +97,21 @@ impl StoredProviderProfile {
         models
     }
 
-    fn matches_managed_endpoint(&self, id: &str, base_url: &str) -> bool {
-        self.id == id && self.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+    fn matches_managed_endpoint<Normalize>(
+        &self,
+        id: &str,
+        base_url: &str,
+        normalize_endpoint: &Normalize,
+    ) -> bool
+    where
+        Normalize: Fn(&str, bool) -> Result<String, String>,
+    {
+        self.id == id
+            && endpoints_match(
+                self,
+                base_url,
+                normalize_endpoint,
+            )
     }
 
     fn summary<F, SecretBackend>(
@@ -272,14 +285,21 @@ impl ProviderProfilesFile {
         self.profiles.iter().find(|profile| profile.id == id)
     }
 
-    pub(crate) fn upsert_profile(
+    pub(crate) fn upsert_profile<Normalize>(
         &mut self,
         mut update: ProviderProfileUpdate,
         secret_changed: bool,
-    ) {
+        normalize_endpoint: Normalize,
+    )
+    where
+        Normalize: Fn(&str, bool) -> Result<String, String>,
+    {
         let available_models = self
             .profile(&update.id)
-            .filter(|profile| profile.base_url == update.base_url && !secret_changed)
+            .filter(|profile| {
+                !secret_changed
+                    && endpoints_match(profile, &update.base_url, &normalize_endpoint)
+            })
             .map(|profile| profile.available_models.clone())
             .unwrap_or_default();
         canonicalize_resident_models(&mut update.resident_models, &available_models);
@@ -352,11 +372,15 @@ impl ProviderProfilesFile {
             .summary(&mut secret_state)
     }
 
-    pub(crate) fn profile_for_managed_values(
+    pub(crate) fn profile_for_managed_values<Normalize>(
         &self,
         managed: &BTreeMap<String, String>,
-    ) -> Option<&StoredProviderProfile> {
-        let base = managed.get(GROK_MODELS_BASE_URL_KEY)?.trim_end_matches('/');
+        normalize_endpoint: Normalize,
+    ) -> Option<&StoredProviderProfile>
+    where
+        Normalize: Fn(&str, bool) -> Result<String, String>,
+    {
+        let base = managed.get(GROK_MODELS_BASE_URL_KEY)?;
         // v0.3.2 records the profile reference beside endpoint metadata. The
         // legacy activeId is consulted only for marker-less v0.3.1 metadata.
         let id = managed
@@ -367,16 +391,20 @@ impl ProviderProfilesFile {
                     .then_some(self.active_id.as_deref())
                     .flatten()
             })?;
-        self.profiles
-            .iter()
-            .find(|profile| profile.matches_managed_endpoint(id, base))
+        self.profiles.iter().find(|profile| {
+            profile.matches_managed_endpoint(id, base, &normalize_endpoint)
+        })
     }
 
-    pub(crate) fn compatible_secret_reference(
+    pub(crate) fn compatible_secret_reference<Normalize>(
         &self,
         managed: &BTreeMap<String, String>,
-    ) -> Result<String, String> {
-        if let Some(profile) = self.profile_for_managed_values(managed) {
+        normalize_endpoint: Normalize,
+    ) -> Result<String, String>
+    where
+        Normalize: Fn(&str, bool) -> Result<String, String>,
+    {
+        if let Some(profile) = self.profile_for_managed_values(managed, normalize_endpoint) {
             return Ok(provider_profile_secret_ref(&profile.id));
         }
         if let Some(id) = managed.get(GROX_PROVIDER_PROFILE_ID_KEY) {
@@ -405,14 +433,17 @@ impl ProviderProfilesFile {
         secrets
     }
 
-    pub(crate) fn legacy_active_profile_for_endpoint(
+    pub(crate) fn legacy_active_profile_for_endpoint<Normalize>(
         &self,
         base_url: &str,
-    ) -> Option<&StoredProviderProfile> {
+        normalize_endpoint: Normalize,
+    ) -> Option<&StoredProviderProfile>
+    where
+        Normalize: Fn(&str, bool) -> Result<String, String>,
+    {
         let id = self.active_id.as_deref()?;
         self.profiles.iter().find(|profile| {
-            profile.id == id
-                && profile.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+            profile.matches_managed_endpoint(id, base_url, &normalize_endpoint)
         })
     }
 }
@@ -492,6 +523,24 @@ where
     })
 }
 
+fn endpoints_match<Normalize>(
+    profile: &StoredProviderProfile,
+    candidate: &str,
+    normalize_endpoint: &Normalize,
+) -> bool
+where
+    Normalize: Fn(&str, bool) -> Result<String, String>,
+{
+    let Ok(profile_base) = normalize_endpoint(&profile.base_url, profile.allow_insecure_http)
+    else {
+        return false;
+    };
+    let Ok(candidate_base) = normalize_endpoint(candidate, profile.allow_insecure_http) else {
+        return false;
+    };
+    profile_base == candidate_base
+}
+
 fn profile_matches_recovery_identity<Normalize>(
     profile: &StoredProviderProfile,
     identity: &ProviderRecoveryIdentity,
@@ -500,18 +549,7 @@ fn profile_matches_recovery_identity<Normalize>(
 where
     Normalize: Fn(&str, bool) -> Result<String, String>,
 {
-    if profile.id != identity.id {
-        return false;
-    }
-    let Ok(profile_base) = normalize_endpoint(&profile.base_url, profile.allow_insecure_http)
-    else {
-        return false;
-    };
-    let Ok(managed_base) = normalize_endpoint(&identity.base_url, profile.allow_insecure_http)
-    else {
-        return false;
-    };
-    profile_base == managed_base
+    profile.id == identity.id && endpoints_match(profile, &identity.base_url, normalize_endpoint)
 }
 
 fn canonical_model_id(model: &str, available_models: &[String]) -> String {
@@ -834,6 +872,17 @@ mod tests {
         .unwrap();
 
         assert!(recovered.profile("provider-backup").is_some());
+        assert_eq!(
+            recovered
+                .compatible_secret_reference(
+                    &managed("provider-backup", "https://GATEWAY.example/v1"),
+                    |value, _| {
+                        Ok(value.to_ascii_lowercase().trim_end_matches('/').to_string())
+                    },
+                )
+                .unwrap(),
+            "provider:provider-backup"
+        );
         assert_eq!(normalize_calls.load(Ordering::Relaxed), 2);
         assert_eq!(create_calls.load(Ordering::Relaxed), 1);
         assert!(primary.exists());
@@ -852,6 +901,7 @@ mod tests {
                 ProviderApiBackend::Auto,
             ),
             false,
+            normalize,
         );
         profiles.active_id = Some("provider-test".into());
         let mut values = BTreeMap::from([
@@ -863,26 +913,34 @@ mod tests {
         ]);
 
         assert_eq!(
-            profiles.compatible_secret_reference(&values).unwrap(),
+            profiles
+                .compatible_secret_reference(&values, normalize)
+                .unwrap(),
             SECRET_REF_DIRECT_COMPATIBLE
         );
         values.insert(GROX_PROVIDER_PROFILE_ID_KEY.into(), "provider-test".into());
         assert_eq!(
-            profiles.compatible_secret_reference(&values).unwrap(),
+            profiles
+                .compatible_secret_reference(&values, normalize)
+                .unwrap(),
             "provider:provider-test"
         );
         values.insert(
             GROK_MODELS_BASE_URL_KEY.into(),
             "https://other.example/v1".into(),
         );
-        assert!(profiles.compatible_secret_reference(&values).is_err());
+        assert!(profiles
+            .compatible_secret_reference(&values, normalize)
+            .is_err());
     }
 
     #[test]
     fn missing_profile_row_remains_fail_closed_when_metadata_has_id() {
         let profiles = ProviderProfilesFile::default();
         let values = managed("provider-missing", "https://gateway.example.com/v1");
-        assert!(profiles.compatible_secret_reference(&values).is_err());
+        assert!(profiles
+            .compatible_secret_reference(&values, normalize)
+            .is_err());
     }
 
     #[test]
@@ -897,6 +955,7 @@ mod tests {
             )
             .resident_models(vec!["Grok-4.3-fast".into(), "GROK-4.5".into()]),
             false,
+            normalize,
         );
         profiles
             .update_catalog(
@@ -906,6 +965,43 @@ mod tests {
             .unwrap();
         let profile = profiles.profile("provider-test").unwrap();
         assert_eq!(profile.resident_models, profile.available_models);
+    }
+
+    #[test]
+    fn equivalent_endpoint_update_preserves_model_catalog() {
+        let mut profiles = ProviderProfilesFile::default();
+        let normalize_identity = |value: &str, _allow_insecure_http: bool| {
+            Ok(value.to_ascii_lowercase().trim_end_matches('/').to_string())
+        };
+        profiles.upsert_profile(
+            ProviderProfileUpdate::new(
+                "provider-test".into(),
+                "Test".into(),
+                "https://gateway.example/v1".into(),
+                ProviderApiBackend::Auto,
+            ),
+            false,
+            normalize_identity,
+        );
+        profiles
+            .update_catalog("provider-test", vec!["grok-build".into()])
+            .unwrap();
+
+        profiles.upsert_profile(
+            ProviderProfileUpdate::new(
+                "provider-test".into(),
+                "Renamed".into(),
+                "HTTPS://GATEWAY.EXAMPLE/v1/".into(),
+                ProviderApiBackend::Auto,
+            ),
+            false,
+            normalize_identity,
+        );
+
+        assert_eq!(
+            profiles.profile("provider-test").unwrap().available_models,
+            vec!["grok-build"]
+        );
     }
 
     #[test]
@@ -919,6 +1015,7 @@ mod tests {
                 ProviderApiBackend::Auto,
             ),
             false,
+            normalize,
         );
         let summary = profiles
             .summary("provider-test", |reference, legacy| {
