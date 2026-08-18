@@ -1892,6 +1892,69 @@ fn atomic_write_private(path: &Path, content: &str) -> Result<(), String> {
     atomic_write_bounded_private(path, content, MAX_CONFIG_BYTES)
 }
 
+/// Atomically publish a new private file without replacing an existing path.
+/// A same-directory hard link gives the final name all at once and fails with
+/// AlreadyExists if another caller won the recovery race.
+fn atomic_create_private(path: &Path, content: &str) -> Result<bool, String> {
+    if content.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "文档不能超过 {} MB",
+            MAX_CONFIG_BYTES / 1024 / 1024
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "配置路径缺少父目录".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("无法创建 {}：{error}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let nonce = CONFIG_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(
+        ".{}.grox-{}-{}.recovering",
+        file_name,
+        std::process::id(),
+        nonce,
+    ));
+    {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp)
+            .map_err(|error| format!("无法创建临时配置 {}：{error}", temp.display()))?;
+        if let Err(error) = file
+            .write_all(content.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(format!("无法写入配置 {}：{error}", temp.display()));
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = restrict_private_file(&temp) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    let result = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(format!(
+            "无法恢复私有配置 {}：{error}",
+            path.display()
+        )),
+    };
+    let _ = fs::remove_file(&temp);
+    result
+}
+
 fn atomic_write_bounded_private(
     path: &Path,
     content: &str,
@@ -6960,20 +7023,148 @@ fn require_provider_secret(reference: &str) -> Result<StoredSecret, String> {
     Ok(secret)
 }
 
-fn read_provider_profiles_file() -> Result<ProviderProfilesFile, String> {
-    let path = provider_profiles_path()?;
-    if !path.exists() {
-        return Ok(ProviderProfilesFile::default());
-    }
-    let content = read_bounded_text(&path, MAX_CONFIG_BYTES)?;
+fn parse_provider_profiles_file(path: &Path) -> Result<ProviderProfilesFile, String> {
+    let content = read_bounded_text(path, MAX_CONFIG_BYTES)?;
     serde_json::from_str(&content).map_err(|error| {
-        // 损坏的持久化数据不是“没有档案”。保留原文件并显式失败，避免一次读取
-        // 错误被写回成空列表，造成不可逆的数据消失。
         format!(
             "无法解析供应商档案 {}，已保留原文件且拒绝覆盖：{error}",
             path.display()
         )
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderRecoveryIdentity {
+    id: String,
+    base_url: String,
+}
+
+fn provider_recovery_identity(
+    managed: &BTreeMap<String, String>,
+) -> Option<ProviderRecoveryIdentity> {
+    if managed.get(GROX_PROVIDER_KIND_KEY).map(String::as_str) != Some("compatible") {
+        return None;
+    }
+    let id = managed.get(GROX_PROVIDER_PROFILE_ID_KEY)?.trim();
+    let base_url = managed.get("GROK_MODELS_BASE_URL")?.trim();
+    if id.is_empty() || base_url.is_empty() {
+        return None;
+    }
+    Some(ProviderRecoveryIdentity {
+        id: id.to_string(),
+        base_url: base_url.to_string(),
+    })
+}
+
+fn profile_matches_recovery_identity(
+    profile: &StoredProviderProfile,
+    identity: &ProviderRecoveryIdentity,
+) -> bool {
+    if profile.id != identity.id {
+        return false;
+    }
+    let Ok(profile_base) = checked_service_url_with_policy(
+        &profile.base_url,
+        "服务地址",
+        profile.allow_insecure_http,
+    ) else {
+        return false;
+    };
+    let Ok(managed_base) = checked_service_url_with_policy(
+        &identity.base_url,
+        "服务地址",
+        profile.allow_insecure_http,
+    ) else {
+        return false;
+    };
+    profile_base == managed_base
+}
+
+fn read_provider_profiles_at(
+    path: &Path,
+    recovery_identity: Option<&ProviderRecoveryIdentity>,
+) -> Result<ProviderProfilesFile, String> {
+    if path.exists() {
+        return parse_provider_profiles_file(path);
+    }
+    let Some(identity) = recovery_identity else {
+        return Ok(ProviderProfilesFile::default());
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(ProviderProfilesFile::default());
+    };
+    let mut backups = match fs::read_dir(parent) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if !name.starts_with("grox-providers.corrupt-") || !name.ends_with(".bak") {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, entry.path()))
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(format!(
+                "无法扫描供应商档案恢复副本 {}：{error}",
+                parent.display()
+            ))
+        }
+    };
+    backups.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+    });
+    for (_, backup) in backups {
+        let Ok(content) = read_bounded_text(&backup, MAX_CONFIG_BYTES) else {
+            continue;
+        };
+        let Ok(profiles) = serde_json::from_str::<ProviderProfilesFile>(&content) else {
+            continue;
+        };
+        if profiles
+            .profiles
+            .iter()
+            .any(|profile| profile.legacy_api_key.is_some())
+            || !profiles
+                .profiles
+                .iter()
+                .any(|profile| profile_matches_recovery_identity(profile, identity))
+        {
+            continue;
+        }
+        // Publish only a current-schema serialization. Backups that still
+        // contain a legacy apiKey are never auto-restored, so plaintext cannot
+        // enter a temporary recovery file on Windows.
+        let recovered = serde_json::to_string_pretty(&profiles)
+            .map_err(|error| format!("无法序列化供应商档案恢复副本：{error}"))?;
+        if !atomic_create_private(path, &recovered)? {
+            return parse_provider_profiles_file(path);
+        }
+        tracing::warn!(
+            target: "grox::providers",
+            backup = %backup.display(),
+            primary = %path.display(),
+            "restored missing provider profiles from a valid recovery copy"
+        );
+        return Ok(profiles);
+    }
+    Ok(ProviderProfilesFile::default())
+}
+
+fn read_provider_profiles_file() -> Result<ProviderProfilesFile, String> {
+    let path = provider_profiles_path()?;
+    let managed = path
+        .parent()
+        .map(|home| parse_grox_managed_provider_env(&home.join(".env")))
+        .unwrap_or_default();
+    let identity = provider_recovery_identity(&managed);
+    read_provider_profiles_at(&path, identity.as_ref())
 }
 
 fn write_provider_profiles_file(value: &ProviderProfilesFile) -> Result<(), String> {
@@ -10491,6 +10682,49 @@ mod tests {
         }
     }
 
+    fn provider_test_root(label: &str) -> PathBuf {
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "grox-provider-recovery-{label}-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn test_provider_profile(id: &str, base_url: &str) -> StoredProviderProfile {
+        StoredProviderProfile {
+            id: id.into(),
+            name: id.into(),
+            legacy_api_key: None,
+            base_url: base_url.into(),
+            allow_insecure_http: false,
+            api_backend: ProviderApiBackend::Auto,
+            models_url: None,
+            model: None,
+            available_models: Vec::new(),
+            resident_models: Vec::new(),
+        }
+    }
+
+    fn write_test_provider_profiles(path: &Path, id: &str, base_url: &str) {
+        let value = ProviderProfilesFile {
+            active_id: Some(id.into()),
+            profiles: vec![test_provider_profile(id, base_url)],
+        };
+        fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn test_provider_recovery_identity(id: &str, base_url: &str) -> ProviderRecoveryIdentity {
+        provider_recovery_identity(&BTreeMap::from([
+            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
+            (GROX_PROVIDER_PROFILE_ID_KEY.into(), id.into()),
+            ("GROK_MODELS_BASE_URL".into(), base_url.into()),
+        ]))
+        .unwrap()
+    }
+
     #[test]
     #[ignore = "set GROK_DESKTOP_CLI to an official binary for opt-in integration"]
     fn configured_grok_command_launches_opt_in_official_binary() {
@@ -11629,6 +11863,157 @@ OPENAI_API_KEY=******** # keep env comment
     }
 
     #[test]
+    fn missing_provider_profiles_restore_the_latest_valid_backup() {
+        let root = provider_test_root("latest");
+        let primary = root.join("grox-providers.json");
+        let older = root.join("grox-providers.corrupt-100.bak");
+        let newer = root.join("grox-providers.corrupt-200.bak");
+        write_test_provider_profiles(&older, "provider-older", "https://older.example/v1");
+        std::thread::sleep(Duration::from_millis(1_100));
+        write_test_provider_profiles(&newer, "provider-newer", "https://newer.example/v1");
+
+        let identity = test_provider_recovery_identity(
+            "provider-newer",
+            "https://newer.example/v1/",
+        );
+        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
+
+        assert_eq!(recovered.active_id.as_deref(), Some("provider-newer"));
+        assert_eq!(
+            parse_provider_profiles_file(&primary)
+                .unwrap()
+                .active_id
+                .as_deref(),
+            Some("provider-newer")
+        );
+        assert!(older.exists());
+        assert!(newer.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_provider_profiles_skip_a_newer_invalid_backup() {
+        let root = provider_test_root("invalid");
+        let primary = root.join("grox-providers.json");
+        let valid = root.join("grox-providers.corrupt-100.bak");
+        let invalid = root.join("grox-providers.corrupt-200.bak");
+        write_test_provider_profiles(&valid, "provider-valid", "https://valid.example/v1");
+        std::thread::sleep(Duration::from_millis(1_100));
+        fs::write(&invalid, "{not-json").unwrap();
+
+        let identity =
+            test_provider_recovery_identity("provider-valid", "https://valid.example/v1");
+        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
+
+        assert_eq!(recovered.active_id.as_deref(), Some("provider-valid"));
+        assert!(invalid.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_profile_recovery_requires_matching_id_and_endpoint() {
+        for (label, identity) in [
+            (
+                "id-mismatch",
+                test_provider_recovery_identity(
+                    "provider-other",
+                    "https://gateway.example/v1",
+                ),
+            ),
+            (
+                "endpoint-mismatch",
+                test_provider_recovery_identity(
+                    "provider-backup",
+                    "https://other.example/v1",
+                ),
+            ),
+        ] {
+            let root = provider_test_root(label);
+            let primary = root.join("grox-providers.json");
+            let backup = root.join("grox-providers.corrupt-100.bak");
+            write_test_provider_profiles(
+                &backup,
+                "provider-backup",
+                "https://gateway.example/v1",
+            );
+
+            let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
+
+            assert!(recovered.profiles.is_empty(), "{label}");
+            assert!(!primary.exists(), "{label}");
+            assert!(backup.exists(), "{label}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_profile_recovery_requires_active_compatible_metadata() {
+        let root = provider_test_root("no-identity");
+        let primary = root.join("grox-providers.json");
+        let backup = root.join("grox-providers.corrupt-100.bak");
+        write_test_provider_profiles(
+            &backup,
+            "provider-backup",
+            "https://gateway.example/v1",
+        );
+
+        let recovered = read_provider_profiles_at(&primary, None).unwrap();
+
+        assert!(recovered.profiles.is_empty());
+        assert!(!primary.exists());
+        assert!(backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_profile_recovery_skips_legacy_plaintext_key_backups() {
+        let root = provider_test_root("legacy-key");
+        let primary = root.join("grox-providers.json");
+        let backup = root.join("grox-providers.corrupt-100.bak");
+        let profile = test_provider_profile("provider-backup", "https://gateway.example/v1");
+        let mut value = serde_json::to_value(ProviderProfilesFile {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        })
+        .unwrap();
+        value["profiles"][0]["apiKey"] = serde_json::json!("legacy-plaintext-key");
+        fs::write(&backup, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let identity = test_provider_recovery_identity(
+            "provider-backup",
+            "https://gateway.example/v1",
+        );
+
+        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
+
+        assert!(recovered.profiles.is_empty());
+        assert!(!primary.exists());
+        assert!(backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_profile_recovery_never_overwrites_an_existing_primary() {
+        let root = provider_test_root("primary");
+        let primary = root.join("grox-providers.json");
+        let backup = root.join("grox-providers.corrupt-999.bak");
+        write_test_provider_profiles(&primary, "provider-primary", "https://primary.example/v1");
+        std::thread::sleep(Duration::from_millis(1_100));
+        write_test_provider_profiles(&backup, "provider-backup", "https://backup.example/v1");
+
+        let loaded = read_provider_profiles_at(&primary, None).unwrap();
+
+        assert_eq!(loaded.active_id.as_deref(), Some("provider-primary"));
+        assert_eq!(
+            parse_provider_profiles_file(&primary)
+                .unwrap()
+                .active_id
+                .as_deref(),
+            Some("provider-primary")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn managed_profile_reference_is_single_source_for_v032_metadata() {
         let profile = StoredProviderProfile {
             id: "provider-test".into(),
@@ -11665,6 +12050,24 @@ OPENAI_API_KEY=******** # keep env comment
             "provider:provider-test"
         );
         values.insert("GROK_MODELS_BASE_URL".into(), "https://other.example/v1".into());
+        assert!(compatible_secret_reference(&profiles, &values).is_err());
+    }
+
+    #[test]
+    fn missing_profile_row_remains_fail_closed_even_if_metadata_has_an_id() {
+        let profiles = ProviderProfilesFile::default();
+        let values = BTreeMap::from([
+            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
+            (
+                "GROK_MODELS_BASE_URL".into(),
+                "https://gateway.example.com/v1".into(),
+            ),
+            (
+                GROX_PROVIDER_PROFILE_ID_KEY.into(),
+                "provider-missing".into(),
+            ),
+        ]);
+
         assert!(compatible_secret_reference(&profiles, &values).is_err());
     }
 
