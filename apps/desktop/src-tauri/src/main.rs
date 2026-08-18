@@ -34,6 +34,7 @@ mod permission_policy;
 mod process_job;
 mod prompt_queue_store;
 mod process_env;
+mod provider_profiles;
 mod session_coordinator;
 mod session_event_journal;
 mod session_journal_store;
@@ -93,6 +94,12 @@ use path_sandbox::{
 };
 use percent_encoding::percent_decode_str;
 use prompt_queue_store::PromptQueueStore;
+use provider_profiles::{
+    checked_model_ids, provider_profile_secret_ref, ProviderApiBackend,
+    ProviderProfileSummary as ProviderProfileSummaryDto, ProviderProfileUpdate,
+    ProviderProfilesFile, StoredProviderProfile, GROK_MODELS_BASE_URL_KEY,
+    GROX_PROVIDER_KIND_KEY, GROX_PROVIDER_PROFILE_ID_KEY, SECRET_REF_DIRECT_COMPATIBLE,
+};
 use serde::{Deserialize, Serialize};
 use session_coordinator::{SessionCoordinator, SessionRuntimeOccupancy};
 use session_event_journal::{
@@ -117,6 +124,8 @@ use tokio::{
 use toml_edit::{value as toml_value, Document, Item, Table, TableLike};
 use worktree_ownership::WorktreeOwnershipStore;
 
+type ProviderProfileSummary = ProviderProfileSummaryDto<SecretBackendKind>;
+
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GROX_BUILD_COMMIT: &str = env!("GROX_BUILD_COMMIT");
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/dandandujie/Grox/releases/latest";
@@ -135,10 +144,7 @@ const GROX_DEEP_RESEARCH_WORKFLOW: &str = include_str!("../resources/grox-deep-r
 const UPSTREAM_CLI_CLIENT_NAME: &str = "grok-shell";
 const GROX_MANAGED_PROVIDER_START: &str = "# >>> Grox managed provider";
 const GROX_MANAGED_PROVIDER_END: &str = "# <<< Grox managed provider";
-const GROX_PROVIDER_KIND_KEY: &str = "GROX_PROVIDER_KIND";
-const GROX_PROVIDER_PROFILE_ID_KEY: &str = "GROX_PROVIDER_PROFILE_ID";
 const SECRET_REF_OFFICIAL_PROVIDER: &str = "provider:official";
-const SECRET_REF_DIRECT_COMPATIBLE: &str = "provider:direct-compatible";
 const GROX_PROVIDER_AUTH_OVERRIDES_FILE: &str = "grox-provider-auth-overrides.json";
 const GROX_PROVIDER_BACKEND_OVERRIDES_FILE: &str = "grox-provider-backend-overrides.json";
 // These are the three documented Grok Build custom-endpoint environment
@@ -146,7 +152,7 @@ const GROX_PROVIDER_BACKEND_OVERRIDES_FILE: &str = "grox-provider-backend-overri
 // survives CLI upgrades instead of depending on an undocumented env var.
 const PROVIDER_ENV_KEYS: [&str; 3] = [
     "XAI_API_KEY",
-    "GROK_MODELS_BASE_URL",
+    GROK_MODELS_BASE_URL_KEY,
     "GROK_MODELS_LIST_URL",
 ];
 const MAX_PROMPT_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -898,59 +904,6 @@ struct ProviderStatus {
     secret_backend: SecretBackendKind,
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ProviderApiBackend {
-    #[default]
-    Auto,
-    Responses,
-    ChatCompletions,
-}
-
-impl ProviderApiBackend {
-    fn config_value(self, _provider_name: &str, _base_url: &str) -> &'static str {
-        match self {
-            Self::Responses => "responses",
-            Self::ChatCompletions => "chat_completions",
-            // 供应商名称不是协议证据。兼容服务默认走 Chat Completions；
-            // 仅在用户明确选择时启用 Responses。
-            Self::Auto => "chat_completions",
-        }
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredProviderProfile {
-    id: String,
-    name: String,
-    /// v0.3.1 及更早版本写在供应商档案里的明文密钥。只读迁移，永不再序列化。
-    #[serde(default, rename = "apiKey", skip_serializing)]
-    legacy_api_key: Option<String>,
-    base_url: String,
-    #[serde(default)]
-    allow_insecure_http: bool,
-    #[serde(default)]
-    api_backend: ProviderApiBackend,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    models_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(default)]
-    available_models: Vec<String>,
-    #[serde(default)]
-    resident_models: Vec<String>,
-}
-
-#[derive(Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderProfilesFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    active_id: Option<String>,
-    #[serde(default)]
-    profiles: Vec<StoredProviderProfile>,
-}
-
 /// Grox changes only the endpoint, credential source, and request protocol
 /// for an active compatible provider. Keep the exact prior TOML items so
 /// switching back to OAuth or the official API restores user configuration.
@@ -998,21 +951,6 @@ struct ProviderBackendBackup {
     base_url: Option<String>,
     api_backend: Option<String>,
     model: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderProfileSummary {
-    id: String,
-    name: String,
-    api_key: String,
-    has_api_key: bool,
-    secret_backend: SecretBackendKind,
-    base_url: String,
-    allow_insecure_http: bool,
-    api_backend: ProviderApiBackend,
-    available_models: Vec<String>,
-    resident_models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -3069,7 +3007,7 @@ fn apply_grox_provider_environment(command: &mut Command) -> Result<(), String> 
         "oauth" => None,
         "official" => Some(require_provider_secret(SECRET_REF_OFFICIAL_PROVIDER)?),
         "compatible" => {
-            for key in ["GROK_MODELS_BASE_URL", "GROK_MODELS_LIST_URL"] {
+            for key in [GROK_MODELS_BASE_URL_KEY, "GROK_MODELS_LIST_URL"] {
                 let value = values
                     .get(key)
                     .filter(|value| !value.trim().is_empty())
@@ -3077,7 +3015,7 @@ fn apply_grox_provider_environment(command: &mut Command) -> Result<(), String> 
                 command.env(key, value);
             }
             let profiles = read_provider_profiles_file()?;
-            let reference = compatible_secret_reference(&profiles, &values)?;
+            let reference = profiles.compatible_secret_reference(&values)?;
             Some(require_provider_secret(&reference)?)
         }
         _ => return Err(format!("未知的 Host 供应商模式：{kind}")),
@@ -7000,10 +6938,6 @@ fn provider_secret_store() -> Result<SecretStore, String> {
     Ok(SecretStore::new(&grok_home()?))
 }
 
-fn provider_profile_secret_ref(id: &str) -> String {
-    format!("provider:{id}")
-}
-
 fn provider_secret_backend(
     reference: &str,
     legacy_value: Option<&str>,
@@ -7015,6 +6949,14 @@ fn provider_secret_backend(
     }
 }
 
+fn provider_profile_secret_state(
+    reference: &str,
+    legacy_value: Option<&str>,
+) -> Result<(SecretBackendKind, bool), String> {
+    let backend = provider_secret_backend(reference, legacy_value)?;
+    Ok((backend, backend != SecretBackendKind::Missing))
+}
+
 fn require_provider_secret(reference: &str) -> Result<StoredSecret, String> {
     let secret = provider_secret_store()?
         .get(reference)?
@@ -7023,153 +6965,27 @@ fn require_provider_secret(reference: &str) -> Result<StoredSecret, String> {
     Ok(secret)
 }
 
-fn parse_provider_profiles_file(path: &Path) -> Result<ProviderProfilesFile, String> {
-    let content = read_bounded_text(path, MAX_CONFIG_BYTES)?;
-    serde_json::from_str(&content).map_err(|error| {
-        format!(
-            "无法解析供应商档案 {}，已保留原文件且拒绝覆盖：{error}",
-            path.display()
-        )
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProviderRecoveryIdentity {
-    id: String,
-    base_url: String,
-}
-
-fn provider_recovery_identity(
-    managed: &BTreeMap<String, String>,
-) -> Option<ProviderRecoveryIdentity> {
-    if managed.get(GROX_PROVIDER_KIND_KEY).map(String::as_str) != Some("compatible") {
-        return None;
-    }
-    let id = managed.get(GROX_PROVIDER_PROFILE_ID_KEY)?.trim();
-    let base_url = managed.get("GROK_MODELS_BASE_URL")?.trim();
-    if id.is_empty() || base_url.is_empty() {
-        return None;
-    }
-    Some(ProviderRecoveryIdentity {
-        id: id.to_string(),
-        base_url: base_url.to_string(),
-    })
-}
-
-fn profile_matches_recovery_identity(
-    profile: &StoredProviderProfile,
-    identity: &ProviderRecoveryIdentity,
-) -> bool {
-    if profile.id != identity.id {
-        return false;
-    }
-    let Ok(profile_base) = checked_service_url_with_policy(
-        &profile.base_url,
-        "服务地址",
-        profile.allow_insecure_http,
-    ) else {
-        return false;
-    };
-    let Ok(managed_base) = checked_service_url_with_policy(
-        &identity.base_url,
-        "服务地址",
-        profile.allow_insecure_http,
-    ) else {
-        return false;
-    };
-    profile_base == managed_base
-}
-
-fn read_provider_profiles_at(
-    path: &Path,
-    recovery_identity: Option<&ProviderRecoveryIdentity>,
-) -> Result<ProviderProfilesFile, String> {
-    if path.exists() {
-        return parse_provider_profiles_file(path);
-    }
-    let Some(identity) = recovery_identity else {
-        return Ok(ProviderProfilesFile::default());
-    };
-    let Some(parent) = path.parent() else {
-        return Ok(ProviderProfilesFile::default());
-    };
-    let mut backups = match fs::read_dir(parent) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name();
-                let name = name.to_str()?;
-                if !name.starts_with("grox-providers.corrupt-") || !name.ends_with(".bak") {
-                    return None;
-                }
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                Some((modified, entry.path()))
-            })
-            .collect::<Vec<_>>(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            return Err(format!(
-                "无法扫描供应商档案恢复副本 {}：{error}",
-                parent.display()
-            ))
-        }
-    };
-    backups.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| right.1.cmp(&left.1))
-    });
-    for (_, backup) in backups {
-        let Ok(content) = read_bounded_text(&backup, MAX_CONFIG_BYTES) else {
-            continue;
-        };
-        let Ok(profiles) = serde_json::from_str::<ProviderProfilesFile>(&content) else {
-            continue;
-        };
-        if profiles
-            .profiles
-            .iter()
-            .any(|profile| profile.legacy_api_key.is_some())
-            || !profiles
-                .profiles
-                .iter()
-                .any(|profile| profile_matches_recovery_identity(profile, identity))
-        {
-            continue;
-        }
-        // Publish only a current-schema serialization. Backups that still
-        // contain a legacy apiKey are never auto-restored, so plaintext cannot
-        // enter a temporary recovery file on Windows.
-        let recovered = serde_json::to_string_pretty(&profiles)
-            .map_err(|error| format!("无法序列化供应商档案恢复副本：{error}"))?;
-        if !atomic_create_private(path, &recovered)? {
-            return parse_provider_profiles_file(path);
-        }
-        tracing::warn!(
-            target: "grox::providers",
-            backup = %backup.display(),
-            primary = %path.display(),
-            "restored missing provider profiles from a valid recovery copy"
-        );
-        return Ok(profiles);
-    }
-    Ok(ProviderProfilesFile::default())
-}
-
 fn read_provider_profiles_file() -> Result<ProviderProfilesFile, String> {
     let path = provider_profiles_path()?;
     let managed = path
         .parent()
         .map(|home| parse_grox_managed_provider_env(&home.join(".env")))
         .unwrap_or_default();
-    let identity = provider_recovery_identity(&managed);
-    read_provider_profiles_at(&path, identity.as_ref())
+    ProviderProfilesFile::read_with_recovery(
+        &path,
+        &managed,
+        |candidate| read_bounded_text(candidate, MAX_CONFIG_BYTES),
+        atomic_create_private,
+        |value, allow_insecure_http| {
+            checked_service_url_with_policy(value, "服务地址", allow_insecure_http)
+        },
+    )
 }
 
 fn write_provider_profiles_file(value: &ProviderProfilesFile) -> Result<(), String> {
     let path = provider_profiles_path()?;
-    let content = serde_json::to_string_pretty(value)
+    let content = value
+        .to_pretty_json()
         .map_err(|error| format!("无法序列化供应商档案：{error}"))?;
     atomic_write_private(&path, &content)
 }
@@ -7179,23 +6995,12 @@ fn write_provider_profiles_file(value: &ProviderProfilesFile) -> Result<(), Stri
 fn migrate_legacy_provider_secrets() -> Result<(), String> {
     let store = provider_secret_store()?;
     let mut profiles = read_provider_profiles_file()?;
-    let mut profiles_changed = false;
-    for profile in &mut profiles.profiles {
-        let Some(key) = profile
-            .legacy_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-        else {
-            profile.legacy_api_key = None;
-            continue;
-        };
+    let legacy_secrets = profiles.take_legacy_secrets();
+    for (id, key) in &legacy_secrets {
         checked_api_key(key)?;
-        store.set(&provider_profile_secret_ref(&profile.id), key)?;
-        profile.legacy_api_key = None;
-        profiles_changed = true;
+        store.set(&provider_profile_secret_ref(id), key)?;
     }
-    if profiles_changed {
+    if !legacy_secrets.is_empty() {
         write_provider_profiles_file(&profiles)?;
     }
 
@@ -7212,21 +7017,16 @@ fn migrate_legacy_provider_secrets() -> Result<(), String> {
     };
     checked_api_key(key)?;
     let base_url = values
-        .get("GROK_MODELS_BASE_URL")
+        .get(GROK_MODELS_BASE_URL_KEY)
         .filter(|value| !value.trim().is_empty());
     let (reference, kind, profile_id) = if let Some(base_url) = base_url {
-        let active = profiles.active_id.as_deref().and_then(|id| {
-            profiles.profiles.iter().find(|profile| {
-                profile.id == id
-                    && profile.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
-            })
-        });
+        let active = profiles.legacy_active_profile_for_endpoint(base_url);
         (
             active
-                .map(|profile| provider_profile_secret_ref(&profile.id))
+                .map(|profile| provider_profile_secret_ref(profile.id()))
                 .unwrap_or_else(|| SECRET_REF_DIRECT_COMPATIBLE.to_string()),
             "compatible",
-            active.map(|profile| profile.id.as_str()),
+            active.map(StoredProviderProfile::id),
         )
     } else {
         (SECRET_REF_OFFICIAL_PROVIDER.to_string(), "official", None)
@@ -7574,78 +7374,6 @@ fn apply_grox_provider_backend_overrides(
     atomic_write_private(&path, &document.to_string())
 }
 
-fn canonical_model_id(model: &str, available_models: &[String]) -> String {
-    available_models
-        .iter()
-        .find(|available| available.eq_ignore_ascii_case(model))
-        .cloned()
-        .unwrap_or_else(|| model.to_string())
-}
-
-fn canonicalize_resident_models(resident_models: &mut Vec<String>, available_models: &[String]) {
-    let mut canonical = Vec::new();
-    for model in resident_models.drain(..) {
-        let model = canonical_model_id(model.trim(), available_models);
-        if !model.is_empty() && !canonical.iter().any(|existing: &String| existing == &model) {
-            canonical.push(model);
-        }
-    }
-    *resident_models = canonical;
-}
-
-fn compatible_profile_backend_model_ids(profile: &StoredProviderProfile) -> Vec<String> {
-    let mut models = profile.resident_models.clone();
-    if models.is_empty() {
-        if let Some(model) = profile.model.as_ref() {
-            models.push(model.clone());
-        } else if let Some(model) = profile.available_models.first() {
-            models.push(model.clone());
-        }
-    }
-    canonicalize_resident_models(&mut models, &profile.available_models);
-    // Grok Build 0.2.x still uses grok-4.5 for session-title generation even
-    // when a dynamic provider selected another model. It inherits the active
-    // endpoint, so it needs the same transport declaration; otherwise a failed
-    // title request triggers auth recovery before the selected model can answer.
-    if !models.iter().any(|model| model == "grok-4.5") {
-        models.push("grok-4.5".to_string());
-    }
-    models
-}
-
-fn provider_profile_summary(
-    profile: &StoredProviderProfile,
-) -> Result<ProviderProfileSummary, String> {
-    let mut resident_models = profile.resident_models.clone();
-    if resident_models.is_empty() {
-        if let Some(model) = profile.model.as_ref().filter(|model| !model.is_empty()) {
-            resident_models.push(model.clone());
-        }
-    }
-    // The `/models` catalog is the source of truth for the spelling sent to a
-    // gateway. A case-only mismatch is enough for many gateways to return a
-    // misleading 503 "model unavailable" response.
-    canonicalize_resident_models(&mut resident_models, &profile.available_models);
-    let secret_backend = provider_secret_backend(
-        &provider_profile_secret_ref(&profile.id),
-        profile.legacy_api_key.as_deref(),
-    )?;
-    Ok(ProviderProfileSummary {
-        id: profile.id.clone(),
-        name: profile.name.clone(),
-        // Never return the raw key to the WebView. The renderer only needs a
-        // presence bit; updates use empty-key-means-keep semantics.
-        api_key: String::new(),
-        has_api_key: secret_backend != SecretBackendKind::Missing,
-        secret_backend,
-        base_url: profile.base_url.clone(),
-        allow_insecure_http: profile.allow_insecure_http,
-        api_backend: profile.api_backend,
-        available_models: profile.available_models.clone(),
-        resident_models,
-    })
-}
-
 fn compatible_models_url(base_url: &str, allow_insecure_http: bool) -> Result<String, String> {
     let base = checked_service_url_with_policy(
         base_url,
@@ -7662,33 +7390,13 @@ fn compatible_models_url(base_url: &str, allow_insecure_http: bool) -> Result<St
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
 }
 
-fn checked_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
-    let mut result = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if model.chars().count() > 200 || model.chars().any(char::is_control) {
-            return Err("模型 ID 不能超过 200 个字符或包含控制字符".into());
-        }
-        if !result.iter().any(|existing| existing == model) {
-            result.push(model.to_owned());
-        }
-        if result.len() > 200 {
-            return Err("常驻模型不能超过 200 个".into());
-        }
-    }
-    Ok(result)
-}
-
 fn provider_metadata_from_values(
     kind: &str,
     values: &BTreeMap<String, String>,
     profile_id: Option<&str>,
 ) -> String {
     let mut lines = vec![format!("{GROX_PROVIDER_KIND_KEY}={}", env_value(kind))];
-    for key in ["GROK_MODELS_BASE_URL", "GROK_MODELS_LIST_URL"] {
+    for key in [GROK_MODELS_BASE_URL_KEY, "GROK_MODELS_LIST_URL"] {
         if let Some(value) = values.get(key).filter(|value| !value.trim().is_empty()) {
             lines.push(format!("{key}={}", env_value(value)));
         }
@@ -7728,7 +7436,7 @@ fn compatible_provider_metadata(
             "{GROX_PROVIDER_KIND_KEY}={}",
             env_value("compatible")
         ),
-        format!("GROK_MODELS_BASE_URL={}", env_value(&base)),
+        format!("{GROK_MODELS_BASE_URL_KEY}={}", env_value(&base)),
         format!(
             "GROK_MODELS_LIST_URL={}",
             env_value(&compatible_models_url(&base, allow_insecure_http)?)
@@ -7743,62 +7451,29 @@ fn compatible_provider_metadata(
     Ok(lines.join("\n"))
 }
 
-fn profile_for_managed_provider_values(
-    value: &ProviderProfilesFile,
-    managed: &BTreeMap<String, String>,
-) -> Option<StoredProviderProfile> {
-    let base = managed.get("GROK_MODELS_BASE_URL")?.trim_end_matches('/');
-    // v0.3.2 records the profile reference beside the endpoint metadata, so
-    // process injection never depends on a second mutable `activeId` source.
-    // The file field is read only for a one-release migration window.
-    let id = managed
-        .get(GROX_PROVIDER_PROFILE_ID_KEY)
-        .map(String::as_str)
-        .or_else(|| {
-            // Only marker-less v0.3.1 metadata may consult the legacy field.
-            // A v0.3.2 direct-compatible block intentionally has no profile id.
-            (!managed.contains_key(GROX_PROVIDER_KIND_KEY))
-                .then_some(value.active_id.as_deref())
-                .flatten()
-        })?;
-    value
-        .profiles
-        .iter()
-        .find(|profile| profile.id == id && profile.base_url.trim_end_matches('/') == base)
-        .cloned()
-}
-
 fn active_profile_for_managed_environment(
     value: &ProviderProfilesFile,
 ) -> Option<StoredProviderProfile> {
     let managed = parse_grox_managed_provider_env(&grok_home().ok()?.join(".env"));
-    profile_for_managed_provider_values(value, &managed)
-}
-
-fn compatible_secret_reference(
-    profiles: &ProviderProfilesFile,
-    values: &BTreeMap<String, String>,
-) -> Result<String, String> {
-    if let Some(profile) = profile_for_managed_provider_values(profiles, values) {
-        return Ok(provider_profile_secret_ref(&profile.id));
-    }
-    if let Some(id) = values.get(GROX_PROVIDER_PROFILE_ID_KEY) {
-        return Err(format!(
-            "活动供应商档案 {id} 不存在，或服务地址与活动元数据不一致"
-        ));
-    }
-    Ok(SECRET_REF_DIRECT_COMPATIBLE.to_string())
+    value.profile_for_managed_values(&managed).cloned()
 }
 
 fn synchronize_active_provider_backend() -> Result<(), String> {
     let profiles = read_provider_profiles_file()?;
     if let Some(profile) = active_profile_for_managed_environment(&profiles) {
-        let model_ids = compatible_profile_backend_model_ids(&profile);
+        let model_ids = profile.compatible_backend_model_ids();
         let primary_model = model_ids
             .first()
             .ok_or("当前供应商没有可用模型，无法配置请求协议")?;
-        let backend = profile.api_backend.config_value(&profile.name, &profile.base_url);
-        apply_grox_provider_backend_overrides(&model_ids, &profile.base_url, primary_model, backend)
+        let backend = profile
+            .api_backend()
+            .config_value(profile.name(), profile.base_url());
+        apply_grox_provider_backend_overrides(
+            &model_ids,
+            profile.base_url(),
+            primary_model,
+            backend,
+        )
     } else {
         // OAuth and official API mode should never retain a custom endpoint's
         // Chat Completions override after a process restart.
@@ -7832,14 +7507,12 @@ fn list_provider_profiles() -> Result<ProviderProfilesResponse, HostError> {
     // A profile is active only when the process environment actually points
     // at it. This avoids a stale persisted id briefly labelling OAuth as an
     // OpenAI-compatible provider while the ACP child is being replaced.
-    let active_id = active_profile_for_managed_environment(&value).map(|profile| profile.id);
+    let active_id = active_profile_for_managed_environment(&value)
+        .map(|profile| profile.id().to_string());
     Ok(ProviderProfilesResponse {
         active_id,
         profiles: value
-            .profiles
-            .iter()
-            .map(provider_profile_summary)
-            .collect::<Result<Vec<_>, _>>()
+            .summaries(provider_profile_secret_state)
             .map_err(|error| provider_storage_error("SECRET_STORE_READ_FAILED", error))?,
     })
 }
@@ -7859,11 +7532,6 @@ fn save_provider_profile(
     }
     let mut value = read_provider_profiles_file()
         .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?;
-    let existing = request
-        .id
-        .as_deref()
-        .and_then(|id| value.profiles.iter().find(|profile| profile.id == id))
-        .cloned();
     let id = request.id.unwrap_or_else(|| {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7903,7 +7571,7 @@ fn save_provider_profile(
             .as_ref()
             .is_none_or(|previous| previous.expose() != requested)
     });
-    let mut resident_models = checked_model_ids(request.resident_models)
+    let resident_models = checked_model_ids(request.resident_models)
         .map_err(|error| HostError::operation("PROVIDER_MODEL_ID_INVALID", error))?;
     let base_url = checked_service_url_with_policy(
         &request.base_url,
@@ -7913,34 +7581,22 @@ fn save_provider_profile(
     .map_err(|error| HostError::operation("PROVIDER_URL_INVALID", error))?;
     compatible_provider_metadata(&base_url, request.allow_insecure_http, Some(&id))
         .map_err(|error| HostError::operation("PROVIDER_URL_INVALID", error))?;
-    let available_models = existing
-        .filter(|profile| profile.base_url == base_url && !secret_changed)
-        .map(|profile| profile.available_models.clone())
-        .unwrap_or_default();
-    canonicalize_resident_models(&mut resident_models, &available_models);
-    let profile = StoredProviderProfile {
-        id: id.clone(),
-        name: name.to_owned(),
-        legacy_api_key: None,
-        base_url: base_url.clone(),
-        allow_insecure_http: request.allow_insecure_http,
-        api_backend: request.api_backend,
-        models_url: None,
-        model: resident_models.first().cloned(),
-        available_models,
-        resident_models,
-    };
-    if let Some(index) = value.profiles.iter().position(|entry| entry.id == id) {
-        value.profiles[index] = profile.clone();
-    } else {
-        value.profiles.push(profile.clone());
-    }
+    let update = ProviderProfileUpdate::new(
+        id.clone(),
+        name.to_owned(),
+        base_url,
+        request.api_backend,
+    )
+    .allow_insecure_http(request.allow_insecure_http)
+    .resident_models(resident_models);
+    value.upsert_profile(update, secret_changed);
     if secret_changed {
         store
             .set(&reference, key)
             .map_err(|error| provider_storage_error("SECRET_STORE_WRITE_FAILED", error))?;
     }
-    let summary = provider_profile_summary(&profile)
+    let summary = value
+        .summary(&id, provider_profile_secret_state)
         .map_err(|error| provider_storage_error("SECRET_STORE_READ_FAILED", error))?;
     if let Err(error) = write_provider_profiles_file(&value) {
         if secret_changed {
@@ -8098,39 +7754,28 @@ async fn fetch_provider_models(request: FetchProviderModels) -> Result<Vec<Strin
 async fn refresh_provider_models(id: String) -> Result<ProviderProfileSummary, HostError> {
     migrate_legacy_provider_secrets()
         .map_err(|error| provider_storage_error("SECRET_MIGRATION_FAILED", error))?;
-    let profile = read_provider_profiles_file()
-        .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?
-        .profiles
-        .into_iter()
-        .find(|profile| profile.id == id)
+    let profiles = read_provider_profiles_file()
+        .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?;
+    let profile = profiles
+        .profile(&id)
+        .cloned()
         .ok_or_else(|| HostError::operation("PROVIDER_PROFILE_NOT_FOUND", "供应商档案不存在"))?;
-    let secret = require_provider_secret(&provider_profile_secret_ref(&profile.id))
+    let secret = require_provider_secret(&provider_profile_secret_ref(profile.id()))
         .map_err(|error| provider_storage_error("SECRET_STORE_READ_FAILED", error))?;
     let models = fetch_compatible_models(
         secret.expose(),
-        &profile.base_url,
-        profile.allow_insecure_http,
+        profile.base_url(),
+        profile.allow_insecure_http(),
     )
     .await?;
 
     let mut value = read_provider_profiles_file()
         .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?;
-    let stored = value
-        .profiles
-        .iter_mut()
-        .find(|stored| stored.id == profile.id)
-        .ok_or_else(|| {
-            HostError::operation("PROVIDER_PROFILE_DELETED", "供应商档案已被删除")
-        })?;
-    stored.available_models = models;
-    canonicalize_resident_models(&mut stored.resident_models, &stored.available_models);
-    if stored.resident_models.is_empty() {
-        if let Some(model) = stored.available_models.first() {
-            stored.resident_models.push(model.clone());
-        }
-    }
-    stored.model = stored.resident_models.first().cloned();
-    let summary = provider_profile_summary(stored)
+    value.update_catalog(profile.id(), models).map_err(|()| {
+        HostError::operation("PROVIDER_PROFILE_DELETED", "供应商档案已被删除")
+    })?;
+    let summary = value
+        .summary(profile.id(), provider_profile_secret_state)
         .map_err(|error| provider_storage_error("SECRET_STORE_READ_FAILED", error))?;
     write_provider_profiles_file(&value)
         .map_err(|error| provider_storage_error("PROVIDER_PROFILE_WRITE_FAILED", error))?;
@@ -8144,14 +7789,12 @@ fn activate_provider_profile(id: String) -> Result<(), HostError> {
     let value = read_provider_profiles_file()
         .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?;
     let profile = value
-        .profiles
-        .iter()
-        .find(|profile| profile.id == id)
+        .profile(&id)
         .cloned()
         .ok_or_else(|| HostError::operation("PROVIDER_PROFILE_NOT_FOUND", "供应商档案不存在"))?;
-    require_provider_secret(&provider_profile_secret_ref(&profile.id))
+    require_provider_secret(&provider_profile_secret_ref(profile.id()))
         .map_err(|error| provider_storage_error("SECRET_STORE_READ_FAILED", error))?;
-    let model_ids = compatible_profile_backend_model_ids(&profile);
+    let model_ids = profile.compatible_backend_model_ids();
     let primary_model = model_ids
         .first()
         .ok_or_else(|| {
@@ -8160,11 +7803,13 @@ fn activate_provider_profile(id: String) -> Result<(), HostError> {
                 "供应商没有可用模型；请先获取模型目录并选择一个模型",
             )
         })?;
-    let backend = profile.api_backend.config_value(&profile.name, &profile.base_url);
+    let backend = profile
+        .api_backend()
+        .config_value(profile.name(), profile.base_url());
     let replacement = compatible_provider_metadata(
-        &profile.base_url,
-        profile.allow_insecure_http,
-        Some(&profile.id),
+        profile.base_url(),
+        profile.allow_insecure_http(),
+        Some(profile.id()),
     )
     .map_err(|error| HostError::operation("PROVIDER_URL_INVALID", error))?;
     let path = grok_home()
@@ -8179,7 +7824,7 @@ fn activate_provider_profile(id: String) -> Result<(), HostError> {
         restore_grox_provider_auth_overrides()?;
         apply_grox_provider_backend_overrides(
             &model_ids,
-            &profile.base_url,
+            profile.base_url(),
             primary_model,
             backend,
         )?;
@@ -8209,13 +7854,11 @@ fn delete_provider_profile(id: String) -> Result<(), HostError> {
     let mut value = read_provider_profiles_file()
         .map_err(|error| provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error))?;
     let profile = value
-        .profiles
-        .iter()
-        .find(|profile| profile.id == id)
+        .profile(&id)
         .cloned()
         .ok_or_else(|| HostError::operation("PROVIDER_PROFILE_NOT_FOUND", "供应商档案不存在"))?;
     let was_active = active_profile_for_managed_environment(&value)
-        .is_some_and(|active| active.id == id);
+        .is_some_and(|active| active.id() == id);
     let active_environment = if was_active {
         let path = grok_home()
             .map_err(|error| provider_storage_error("PROVIDER_HOME_UNAVAILABLE", error))?
@@ -8226,7 +7869,7 @@ fn delete_provider_profile(id: String) -> Result<(), HostError> {
     } else {
         None
     };
-    let reference = provider_profile_secret_ref(&profile.id);
+    let reference = provider_profile_secret_ref(profile.id());
     let store = provider_secret_store()
         .map_err(|error| provider_storage_error("SECRET_STORE_OPEN_FAILED", error))?;
     let previous_secret = store
@@ -8235,10 +7878,7 @@ fn delete_provider_profile(id: String) -> Result<(), HostError> {
     store
         .delete(&reference)
         .map_err(|error| provider_storage_error("SECRET_STORE_DELETE_FAILED", error))?;
-    value.profiles.retain(|profile| profile.id != id);
-    if value.active_id.as_deref() == Some(id.as_str()) {
-        value.active_id = None;
-    }
+    value.remove_profile(&id);
     let result = (|| {
         if was_active {
             restore_grox_provider_auth_overrides()?;
@@ -8288,7 +7928,7 @@ fn read_provider_status() -> Result<ProviderStatus, HostError> {
         .get("XAI_API_KEY")
         .filter(|value| !value.trim().is_empty());
     let base_url = values
-        .get("GROK_MODELS_BASE_URL")
+        .get(GROK_MODELS_BASE_URL_KEY)
         .filter(|value| !value.trim().is_empty())
         .cloned();
     let kind = match values.get(GROX_PROVIDER_KIND_KEY).map(String::as_str) {
@@ -8314,7 +7954,7 @@ fn read_provider_status() -> Result<ProviderStatus, HostError> {
                 let profiles = read_provider_profiles_file().map_err(|error| {
                     provider_storage_error("PROVIDER_PROFILES_READ_FAILED", error)
                 })?;
-                Some(compatible_secret_reference(&profiles, &values).map_err(|error| {
+                Some(profiles.compatible_secret_reference(&values).map_err(|error| {
                     HostError::protocol_with_action(
                         "PROVIDER_PROFILE_REFERENCE_INVALID",
                         error,
@@ -10682,49 +10322,6 @@ mod tests {
         }
     }
 
-    fn provider_test_root(label: &str) -> PathBuf {
-        static NONCE: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "grox-provider-recovery-{label}-{}-{}",
-            std::process::id(),
-            NONCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    fn test_provider_profile(id: &str, base_url: &str) -> StoredProviderProfile {
-        StoredProviderProfile {
-            id: id.into(),
-            name: id.into(),
-            legacy_api_key: None,
-            base_url: base_url.into(),
-            allow_insecure_http: false,
-            api_backend: ProviderApiBackend::Auto,
-            models_url: None,
-            model: None,
-            available_models: Vec::new(),
-            resident_models: Vec::new(),
-        }
-    }
-
-    fn write_test_provider_profiles(path: &Path, id: &str, base_url: &str) {
-        let value = ProviderProfilesFile {
-            active_id: Some(id.into()),
-            profiles: vec![test_provider_profile(id, base_url)],
-        };
-        fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    }
-
-    fn test_provider_recovery_identity(id: &str, base_url: &str) -> ProviderRecoveryIdentity {
-        provider_recovery_identity(&BTreeMap::from([
-            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
-            (GROX_PROVIDER_PROFILE_ID_KEY.into(), id.into()),
-            ("GROK_MODELS_BASE_URL".into(), base_url.into()),
-        ]))
-        .unwrap()
-    }
-
     #[test]
     #[ignore = "set GROK_DESKTOP_CLI to an official binary for opt-in integration"]
     fn configured_grok_command_launches_opt_in_official_binary() {
@@ -11844,263 +11441,6 @@ OPENAI_API_KEY=******** # keep env comment
     }
 
     #[test]
-    fn provider_profiles_never_serialize_legacy_plaintext_keys() {
-        let profile = StoredProviderProfile {
-            id: "provider-test".into(),
-            name: "Test".into(),
-            legacy_api_key: Some("must-not-leak".into()),
-            base_url: "https://gateway.example.com/v1".into(),
-            allow_insecure_http: false,
-            api_backend: ProviderApiBackend::Auto,
-            models_url: None,
-            model: None,
-            available_models: Vec::new(),
-            resident_models: Vec::new(),
-        };
-        let json = serde_json::to_string(&profile).unwrap();
-        assert!(!json.contains("apiKey"));
-        assert!(!json.contains("must-not-leak"));
-    }
-
-    #[test]
-    fn missing_provider_profiles_restore_the_latest_valid_backup() {
-        let root = provider_test_root("latest");
-        let primary = root.join("grox-providers.json");
-        let older = root.join("grox-providers.corrupt-100.bak");
-        let newer = root.join("grox-providers.corrupt-200.bak");
-        write_test_provider_profiles(&older, "provider-older", "https://older.example/v1");
-        std::thread::sleep(Duration::from_millis(1_100));
-        write_test_provider_profiles(&newer, "provider-newer", "https://newer.example/v1");
-
-        let identity = test_provider_recovery_identity(
-            "provider-newer",
-            "https://newer.example/v1/",
-        );
-        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
-
-        assert_eq!(recovered.active_id.as_deref(), Some("provider-newer"));
-        assert_eq!(
-            parse_provider_profiles_file(&primary)
-                .unwrap()
-                .active_id
-                .as_deref(),
-            Some("provider-newer")
-        );
-        assert!(older.exists());
-        assert!(newer.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn missing_provider_profiles_skip_a_newer_invalid_backup() {
-        let root = provider_test_root("invalid");
-        let primary = root.join("grox-providers.json");
-        let valid = root.join("grox-providers.corrupt-100.bak");
-        let invalid = root.join("grox-providers.corrupt-200.bak");
-        write_test_provider_profiles(&valid, "provider-valid", "https://valid.example/v1");
-        std::thread::sleep(Duration::from_millis(1_100));
-        fs::write(&invalid, "{not-json").unwrap();
-
-        let identity =
-            test_provider_recovery_identity("provider-valid", "https://valid.example/v1");
-        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
-
-        assert_eq!(recovered.active_id.as_deref(), Some("provider-valid"));
-        assert!(invalid.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn provider_profile_recovery_requires_matching_id_and_endpoint() {
-        for (label, identity) in [
-            (
-                "id-mismatch",
-                test_provider_recovery_identity(
-                    "provider-other",
-                    "https://gateway.example/v1",
-                ),
-            ),
-            (
-                "endpoint-mismatch",
-                test_provider_recovery_identity(
-                    "provider-backup",
-                    "https://other.example/v1",
-                ),
-            ),
-        ] {
-            let root = provider_test_root(label);
-            let primary = root.join("grox-providers.json");
-            let backup = root.join("grox-providers.corrupt-100.bak");
-            write_test_provider_profiles(
-                &backup,
-                "provider-backup",
-                "https://gateway.example/v1",
-            );
-
-            let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
-
-            assert!(recovered.profiles.is_empty(), "{label}");
-            assert!(!primary.exists(), "{label}");
-            assert!(backup.exists(), "{label}");
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn provider_profile_recovery_requires_active_compatible_metadata() {
-        let root = provider_test_root("no-identity");
-        let primary = root.join("grox-providers.json");
-        let backup = root.join("grox-providers.corrupt-100.bak");
-        write_test_provider_profiles(
-            &backup,
-            "provider-backup",
-            "https://gateway.example/v1",
-        );
-
-        let recovered = read_provider_profiles_at(&primary, None).unwrap();
-
-        assert!(recovered.profiles.is_empty());
-        assert!(!primary.exists());
-        assert!(backup.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn provider_profile_recovery_skips_legacy_plaintext_key_backups() {
-        let root = provider_test_root("legacy-key");
-        let primary = root.join("grox-providers.json");
-        let backup = root.join("grox-providers.corrupt-100.bak");
-        let profile = test_provider_profile("provider-backup", "https://gateway.example/v1");
-        let mut value = serde_json::to_value(ProviderProfilesFile {
-            active_id: Some(profile.id.clone()),
-            profiles: vec![profile],
-        })
-        .unwrap();
-        value["profiles"][0]["apiKey"] = serde_json::json!("legacy-plaintext-key");
-        fs::write(&backup, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        let identity = test_provider_recovery_identity(
-            "provider-backup",
-            "https://gateway.example/v1",
-        );
-
-        let recovered = read_provider_profiles_at(&primary, Some(&identity)).unwrap();
-
-        assert!(recovered.profiles.is_empty());
-        assert!(!primary.exists());
-        assert!(backup.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn provider_profile_recovery_never_overwrites_an_existing_primary() {
-        let root = provider_test_root("primary");
-        let primary = root.join("grox-providers.json");
-        let backup = root.join("grox-providers.corrupt-999.bak");
-        write_test_provider_profiles(&primary, "provider-primary", "https://primary.example/v1");
-        std::thread::sleep(Duration::from_millis(1_100));
-        write_test_provider_profiles(&backup, "provider-backup", "https://backup.example/v1");
-
-        let loaded = read_provider_profiles_at(&primary, None).unwrap();
-
-        assert_eq!(loaded.active_id.as_deref(), Some("provider-primary"));
-        assert_eq!(
-            parse_provider_profiles_file(&primary)
-                .unwrap()
-                .active_id
-                .as_deref(),
-            Some("provider-primary")
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn managed_profile_reference_is_single_source_for_v032_metadata() {
-        let profile = StoredProviderProfile {
-            id: "provider-test".into(),
-            name: "Test".into(),
-            legacy_api_key: None,
-            base_url: "https://gateway.example.com/v1".into(),
-            allow_insecure_http: false,
-            api_backend: ProviderApiBackend::Auto,
-            models_url: None,
-            model: None,
-            available_models: Vec::new(),
-            resident_models: Vec::new(),
-        };
-        let profiles = ProviderProfilesFile {
-            active_id: Some(profile.id.clone()),
-            profiles: vec![profile],
-        };
-        let mut values = BTreeMap::from([
-            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
-            (
-                "GROK_MODELS_BASE_URL".into(),
-                "https://gateway.example.com/v1".into(),
-            ),
-        ]);
-
-        // A v0.3.2 direct block intentionally ignores the legacy activeId.
-        assert_eq!(
-            compatible_secret_reference(&profiles, &values).unwrap(),
-            SECRET_REF_DIRECT_COMPATIBLE
-        );
-        values.insert(GROX_PROVIDER_PROFILE_ID_KEY.into(), "provider-test".into());
-        assert_eq!(
-            compatible_secret_reference(&profiles, &values).unwrap(),
-            "provider:provider-test"
-        );
-        values.insert("GROK_MODELS_BASE_URL".into(), "https://other.example/v1".into());
-        assert!(compatible_secret_reference(&profiles, &values).is_err());
-    }
-
-    #[test]
-    fn missing_profile_row_remains_fail_closed_even_if_metadata_has_an_id() {
-        let profiles = ProviderProfilesFile::default();
-        let values = BTreeMap::from([
-            (GROX_PROVIDER_KIND_KEY.into(), "compatible".into()),
-            (
-                "GROK_MODELS_BASE_URL".into(),
-                "https://gateway.example.com/v1".into(),
-            ),
-            (
-                GROX_PROVIDER_PROFILE_ID_KEY.into(),
-                "provider-missing".into(),
-            ),
-        ]);
-
-        assert!(compatible_secret_reference(&profiles, &values).is_err());
-    }
-
-    #[test]
-    fn provider_models_use_the_exact_catalogue_id() {
-        let available = vec!["grok-4.3-fast".to_string(), "grok-4.5".to_string()];
-        let mut resident = vec!["Grok-4.3-fast".to_string(), "GROK-4.5".to_string()];
-        canonicalize_resident_models(&mut resident, &available);
-        assert_eq!(resident, available);
-    }
-
-    #[test]
-    fn provider_backend_choice_is_honored_and_auto_does_not_guess_from_name() {
-        assert_eq!(
-            ProviderApiBackend::Responses.config_value("custom", "https://api.example/v1"),
-            "responses"
-        );
-        assert_eq!(
-            ProviderApiBackend::ChatCompletions
-                .config_value("custom", "https://api.example/v1"),
-            "chat_completions"
-        );
-        assert_eq!(
-            ProviderApiBackend::Auto.config_value("DeepSeek", "https://api.deepseek.com/v1"),
-            "chat_completions"
-        );
-        assert_eq!(
-            ProviderApiBackend::Auto.config_value("CLIProxyAPI", "https://gateway.example/v1"),
-            "chat_completions"
-        );
-    }
-
-    #[test]
     fn compatible_model_auth_override_wins_without_damaging_existing_toml() {
         let mut document = parse_grok_config_document(
             r#"
@@ -12177,7 +11517,7 @@ UNRELATED=value
         fs::remove_file(&path).unwrap();
         assert_eq!(values.get("XAI_API_KEY"), Some(&"grox-key".to_string()));
         assert_eq!(
-            values.get("GROK_MODELS_BASE_URL"),
+            values.get(GROK_MODELS_BASE_URL_KEY),
             Some(&"https://gateway.example/v1".to_string())
         );
         assert!(!values.contains_key("UNRELATED"));
@@ -12205,7 +11545,7 @@ UNRELATED=value
         let official = parse_grox_managed_provider_env(&path);
         assert_eq!(official.get(GROX_PROVIDER_KIND_KEY), Some(&"official".to_string()));
         assert!(!official.contains_key("XAI_API_KEY"));
-        assert!(!official.contains_key("GROK_MODELS_BASE_URL"));
+        assert!(!official.contains_key(GROK_MODELS_BASE_URL_KEY));
 
         // Compatible mode intentionally carries the full endpoint contract.
         let compatible = compatible_provider_metadata(
@@ -12222,7 +11562,7 @@ UNRELATED=value
             Some(&"provider-test".to_string())
         );
         assert_eq!(
-            gateway.get("GROK_MODELS_BASE_URL"),
+            gateway.get(GROK_MODELS_BASE_URL_KEY),
             Some(&"https://gateway.example/v1".to_string())
         );
         assert!(!gateway.contains_key("GROK_MODELS_API_BACKEND"));
