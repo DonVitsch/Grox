@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prepare-release:
     name: Prepare release notes
@@ -40,13 +44,15 @@ jobs:
             gh release edit $env:GITHUB_REF_NAME `
               --repo $env:GITHUB_REPOSITORY `
               --title "Grox $env:GITHUB_REF_NAME" `
-              --notes-file $notesPath
+              --notes-file $notesPath `
+              --draft
           } else {
             gh release create $env:GITHUB_REF_NAME `
               --repo $env:GITHUB_REPOSITORY `
               --title "Grox $env:GITHUB_REF_NAME" `
               --notes-file $notesPath `
-              --verify-tag
+              --verify-tag `
+              --draft
           }
 
   build:
@@ -113,7 +119,7 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: Grox ${{ github.ref_name }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
@@ -154,3 +160,12 @@ jobs:
             | sed 's#release-assets/##' > SHA256SUMS
           test -s SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish completed release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest
