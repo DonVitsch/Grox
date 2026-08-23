@@ -1059,7 +1059,6 @@ export class AcpBridge implements GrokBridge {
   private recoveredReplaySessions = new Set<string>();
   private automationStartedSessions = new Set<string>();
   private streamAppends = new Map<string, Extract<BridgeEvent, { type: "assistant_append" | "thinking_append" }>>();
-  private repeatedDeltas = new Map<string, { value: string; count: number }>();
   private streamFlushTimer: number | undefined;
   private toolPatches = new Map<string, Extract<BridgeEvent, { type: "tool_patch" }>>();
   private toolFlushTimer: number | undefined;
@@ -1157,23 +1156,9 @@ export class AcpBridge implements GrokBridge {
 
   private queueStreamAppend(event: Extract<BridgeEvent, { type: "assistant_append" | "thinking_append" }>) {
     const key = `${event.type}:${event.sessionId}:${event.blockId}`;
-    // Guard against pathological model loops without touching Markdown syntax.
-    // In particular, GFM table divider rows are long runs of `-`; collapsing
-    // those dashes makes the otherwise valid table become one plain paragraph.
-    const delta = event.delta.replace(/(.{1,16})\1{5,}/gu, (match, unit: string) => (
-      /[|`~*_#[\]():-]/u.test(unit) ? match : `${unit}${unit}…`
-    ));
-    if (!delta) return;
-    const previous = this.repeatedDeltas.get(key);
-    if (previous?.value === delta && delta.trim().length <= 24) {
-      const count = previous.count + 1;
-      this.repeatedDeltas.set(key, { value: delta, count });
-      if (count >= 4) return;
-    } else {
-      this.repeatedDeltas.set(key, { value: delta, count: 1 });
-    }
+    if (!event.delta) return;
     const pending = this.streamAppends.get(key);
-    this.streamAppends.set(key, pending ? { ...pending, delta: pending.delta + delta } : { ...event, delta });
+    this.streamAppends.set(key, pending ? { ...pending, delta: pending.delta + event.delta } : event);
     if (this.streamFlushTimer === undefined) {
       this.streamFlushTimer = window.setTimeout(() => this.flushStreamAppends(), STREAM_FLUSH_MS);
     }
@@ -2004,12 +1989,10 @@ export class AcpBridge implements GrokBridge {
         this.onNotification(projection.method, projection.params);
         return false;
       case "orphan_response":
-        // 正常响应已由原生 Host 定向交付；进入事件流的响应没有请求归属。
-        this.emitProtocolNotice(
-          "ACP_ORPHAN_RESPONSE",
-          "收到无法归属到当前请求的 ACP 响应",
-          "若会话状态异常，请重新打开该会话",
-        );
+        // 请求本身已由 Host 完成、取消或超时；没有归属的迟到/重复响应不能
+        // 改写任何会话，也不应冒充用户可处理的当前请求错误。
+        this.diagnostics.push("ACP_ORPHAN_RESPONSE：Host 隔离了迟到或重复的 ACP 响应");
+        this.diagnostics = this.diagnostics.slice(-20);
         return false;
       case "protocol_error":
         this.diagnostics.push(`${projection.code}：${projection.message}`);
@@ -2179,12 +2162,9 @@ export class AcpBridge implements GrokBridge {
           patch: {
             type: "thinking",
             live: false,
-            elapsedMs: operation.startedAt ? Date.now() - operation.startedAt : undefined,
+            elapsedMs: !this.replaying.has(sessionId) && operation.startedAt ? Date.now() - operation.startedAt : undefined,
           } as Partial<SessionBlock>,
         });
-      }
-      for (const key of this.repeatedDeltas.keys()) {
-        if (key.includes(`:${sessionId}:${operation.blockId}`)) this.repeatedDeltas.delete(key);
       }
     }
   }
@@ -2751,12 +2731,9 @@ export class AcpBridge implements GrokBridge {
         patch: {
           type: "thinking",
           live: false,
-          elapsedMs: cursor.thinkingStartedAt ? Date.now() - cursor.thinkingStartedAt : undefined,
+          elapsedMs: !this.replaying.has(sessionId) && cursor.thinkingStartedAt ? Date.now() - cursor.thinkingStartedAt : undefined,
         } as Partial<SessionBlock>,
       });
-      for (const key of this.repeatedDeltas.keys()) {
-        if (key.includes(`:${sessionId}:${cursor.thinkingId}`)) this.repeatedDeltas.delete(key);
-      }
       cursor.thinkingId = undefined;
       cursor.thinkingStartedAt = undefined;
     }
@@ -2781,9 +2758,6 @@ export class AcpBridge implements GrokBridge {
         blockId: cursor.assistantId,
         patch: { type: "assistant", streaming: false } as Partial<SessionBlock>,
       });
-      for (const key of this.repeatedDeltas.keys()) {
-        if (key.includes(`:${sessionId}:${cursor.assistantId}`)) this.repeatedDeltas.delete(key);
-      }
       cursor.assistantId = undefined;
     }
   }
