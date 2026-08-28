@@ -250,12 +250,16 @@ body {
 .ui-zoom {
   zoom: var(--grox-ui-scale, 1);
 }
-.titlebar.ui-zoom,
 .statusbar.ui-zoom {
   width: calc(100% / var(--grox-ui-scale, 1));
 }
 .titlebar {
-  height: var(--grox-titlebar-h, 40px);
+  height: 40px;
+  zoom: 1;
+}
+.titlebar .chip {
+  height: 28px;
+  font-size: 12px;
 }
 .statusbar {
   height: var(--grox-statusbar-h, 32px);

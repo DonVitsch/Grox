@@ -10,6 +10,7 @@ import { Icon } from "../fx/Icon";
 import { useI18n } from "../../lib/i18n";
 import { EnvironmentSummary } from "./EnvironmentSummary";
 import { usePreferences } from "../../state/preferences";
+import { setChromeOverlay } from "../../lib/grokWebChat";
 import {
   getAvailableOpenApplications,
   getDefaultOpenApplication,
@@ -56,7 +57,7 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className={`titlebar ui-zoom relative z-40 flex shrink-0 items-center border-b border-line bg-void pr-2 select-none ${windows ? "pl-2" : "pl-[78px]"}`}
+      className={`titlebar relative z-40 flex shrink-0 items-center border-b border-line bg-void pr-2 select-none ${windows ? "pl-2" : "pl-[78px]"}`}
     >
       {!sidebarVisible && (
         <div
@@ -164,9 +165,17 @@ function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
       if (value?.id) setApplication(value);
     };
     const close = (event: PointerEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+        setChromeOverlay(false);
+      }
     };
-    const escape = (event: KeyboardEvent) => event.key === "Escape" && setOpen(false);
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        setChromeOverlay(false);
+      }
+    };
     window.addEventListener("grox:open-applications", syncApplications);
     window.addEventListener("grox:default-open-application", sync);
     document.addEventListener("pointerdown", close, true);
@@ -204,6 +213,7 @@ function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
         onClick={() => {
           const next = !open;
           setOpen(next);
+          setChromeOverlay(next);
           if (next) {
             void refreshOpenApplications().then((items) => {
               setApplications(items);
@@ -231,6 +241,7 @@ function DefaultOpenMenu({ language }: { language: "zh-CN" | "en-US" }) {
                 setDefaultOpenApplication(item);
                 setApplication(item);
                 setOpen(false);
+                setChromeOverlay(false);
               }}
               className={`flex h-8 w-full items-center gap-2 rounded-[4px] px-2 text-left text-[10.5px] transition-colors ${application.id === item.id ? "bg-acc-wash text-fg" : "text-mute hover:bg-high hover:text-fg2"}`}
             >

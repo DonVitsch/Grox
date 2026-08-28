@@ -8,6 +8,7 @@ import {
   writeSkippedUpdateVersion,
 } from "../../lib/updateNoticePolicy";
 import { Icon } from "../fx/Icon";
+import { setChromeOverlay } from "../../lib/grokWebChat";
 import { Wordmark } from "../fx/Wordmark";
 
 interface UpdateInfo {
@@ -111,6 +112,11 @@ export function UpdateNotice() {
     sessionDismissed.current = true;
     setOpen(false);
   };
+
+  useEffect(() => {
+    setChromeOverlay(open);
+    return () => setChromeOverlay(false);
+  }, [open]);
 
   useEffect(() => {
     const automaticCheck = () => {

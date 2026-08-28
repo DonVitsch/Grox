@@ -14,13 +14,15 @@ import { PromptOptionsMenu, ProviderSwitcher } from "../common/PromptControls";
 import { useI18n } from "../../lib/i18n";
 import { MediaStudio } from "./MediaStudio";
 import { AutomationsStudio } from "./AutomationsStudio";
+import { GrokChatStudio } from "./GrokChatStudio";
+import { WorkspaceTabs, type HomeWorkspaceMode } from "./workspaceTabs";
 import { useImeGuard } from "../../lib/ime";
 import { clearDraftBuffer, loadDraftBuffer, saveDraftBuffer } from "../../lib/draftPersistence";
 import { cleanApiError } from "../../lib/runtimeNotice";
 
 export function Home() {
   const { language, t } = useI18n();
-  const [workspaceMode, setWorkspaceMode] = useState<"conversation" | "image" | "video" | "automations">("conversation");
+  const [workspaceMode, setWorkspaceMode] = useState<HomeWorkspaceMode>("conversation");
   const [q, setQ] = useState("");
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -161,6 +163,10 @@ export function Home() {
 
   const currentModel = models.find((item) => item.id === model);
 
+  if (workspaceMode === "chat") {
+    return <GrokChatStudio mode={workspaceMode} onChange={setWorkspaceMode} />;
+  }
+
   if (workspaceMode !== "conversation") {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-base">
@@ -291,28 +297,4 @@ export function Home() {
   );
 }
 
-function WorkspaceTabs({ mode, onChange }: { mode: "conversation" | "image" | "video" | "automations"; onChange(mode: "conversation" | "image" | "video" | "automations"): void }) {
-  const { language } = useI18n();
-  const zh = language === "zh-CN";
-  return (
-    <div role="tablist" aria-label={zh ? "工作台类型" : "Workspace type"} className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line2 bg-panel/90 p-1 shadow-lg backdrop-blur animate-mission-in" style={{ animationDelay: "0.02s" }}>
-      {([
-        ["conversation", zh ? "对话" : "CHAT"],
-        ["image", zh ? "图片" : "IMAGE"],
-        ["video", zh ? "视频" : "VIDEO"],
-        ["automations", zh ? "已安排" : "SCHEDULED"],
-      ] as const).map(([id, label]) => (
-        <button
-          key={id}
-          role="tab"
-          aria-selected={mode === id}
-          onClick={() => onChange(id)}
-          className={`flex h-8 items-center gap-1.5 rounded-full px-4 text-[12px] transition-colors ${mode === id ? "bg-acc text-base" : "text-dim hover:bg-high hover:text-fg2"}`}
-        >
-          {id === "conversation" ? <Icon name="command" size={11} /> : id === "image" ? <Icon name="layers" size={11} /> : id === "video" ? <Icon name="play" size={11} /> : <Icon name="clock" size={11} />}
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
+

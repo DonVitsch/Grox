@@ -167,4 +167,13 @@ describe("layout adaptability — chrome hard rules", () => {
   it("lbl/chip stay fixed component size", () => {
     expect(tokens).toMatch(/\.lbl,\s*\r?\n\.chip\s*\{[\s\S]*?font-size:\s*var\(--grox-component-font-size/);
   });
+
+  it("titlebar chips stay at default size independent of interface scale", () => {
+    const titlebar = blockFor(".titlebar");
+    expect(titlebar).toMatch(/height:\s*40px/);
+    expect(titlebar).toMatch(/zoom:\s*1/);
+    expect(tokens).toMatch(/\.titlebar \.chip\s*\{[\s\S]*?height:\s*28px/);
+    expect(tokens).toMatch(/\.titlebar \.chip\s*\{[\s\S]*?font-size:\s*12px/);
+    expect(tokens).not.toMatch(/\.titlebar\.ui-zoom/);
+  });
 });

@@ -152,6 +152,11 @@ const paths: Record<string, JSX.Element> = {
     </>
   ),
   moon: <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z" />,
+  chat: (
+    <>
+      <path d="M5 5h14a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H9.2L5 21.5V17.5H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
+    </>
+  ),
 };
 
 export interface IconProps {
