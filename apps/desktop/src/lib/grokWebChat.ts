@@ -102,52 +102,19 @@ async function ensureWindow(bounds: WebviewBounds): Promise<ChatWindow | null> {
   if (chat) return chat;
   if (creating) return creating;
   creating = (async () => {
+    await invoke("grok_chat_prepare");
     const [{ WebviewWindow }, { LogicalPosition, LogicalSize }] = await Promise.all([
       import("@tauri-apps/api/webviewWindow"),
       import("@tauri-apps/api/dpi"),
     ]);
     const existing = await WebviewWindow.getByLabel(GROK_CHAT_LABEL);
+    if (!existing) throw new Error("无法创建 grok.com 窗口");
     const screen = await hostToScreen(bounds);
-    if (existing) {
-      chat = existing as unknown as ChatWindow;
-      await existing.setPosition(new LogicalPosition(screen.x, screen.y));
-      await existing.setSize(new LogicalSize(screen.width, screen.height));
-      return chat;
-    }
-    const appearance = buildGrokChatAppearanceCss();
-    const created = new WebviewWindow(GROK_CHAT_LABEL, {
-      url: GROK_WEB_URL,
-      title: "Grok",
-      x: screen.x,
-      y: screen.y,
-      width: screen.width,
-      height: screen.height,
-      decorations: false,
-      resizable: false,
-      maximizable: false,
-      minimizable: false,
-      closable: false,
-      skipTaskbar: true,
-      shadow: false,
-      focus: true,
-      visible: false,
-      backgroundThrottling: "disabled" as never,
-      backgroundColor: appearance.background,
-    });
-    await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error("grok.com 窗口创建超时")), 12_000);
-      void created.once("tauri://created", () => {
-        window.clearTimeout(timeout);
-        resolve();
-      });
-      void created.once("tauri://error", (event) => {
-        window.clearTimeout(timeout);
-        reject(event.payload ?? new Error("无法打开 grok.com"));
-      });
-    });
-    chat = created as unknown as ChatWindow;
-    void created.once("tauri://destroyed", () => {
-      if (chat === (created as unknown as ChatWindow)) {
+    chat = existing as unknown as ChatWindow;
+    await existing.setPosition(new LogicalPosition(screen.x, screen.y));
+    await existing.setSize(new LogicalSize(screen.width, screen.height));
+    void existing.once("tauri://destroyed", () => {
+      if (chat === (existing as unknown as ChatWindow)) {
         chat = null;
         visible = false;
       }
@@ -196,4 +163,23 @@ export async function hideGrokWebChat(): Promise<void> {
 /** The grok.com window stays alive until the Host process exits. */
 export function grokChatWindowLive(): boolean {
   return chat !== null;
+}
+
+export async function grokChatLoginStatus(): Promise<boolean> {
+  if (!inTauri()) return false;
+  const status = await invoke<{ loggedIn: boolean }>("grok_chat_login_status");
+  return Boolean(status.loggedIn);
+}
+
+export async function grokChatBeginBrowserLogin(): Promise<void> {
+  if (!inTauri()) {
+    window.open(GROK_WEB_URL, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await invoke("grok_chat_begin_browser_login");
+}
+
+export async function grokChatSyncBrowserSession(): Promise<{ imported: number; loggedIn: boolean; detail: string }> {
+  if (!inTauri()) return { imported: 0, loggedIn: false, detail: "" };
+  return invoke("grok_chat_sync_browser_session");
 }

@@ -58,3 +58,4 @@ describe("grok web appearance css", () => {
     expect(grokChatWindowLive()).toBe(false);
   });
 });
+

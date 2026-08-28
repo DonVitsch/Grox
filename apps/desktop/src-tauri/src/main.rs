@@ -18,6 +18,7 @@ mod computer_mcp;
 mod draft_store;
 mod file_commands;
 mod foreground_turn;
+mod grok_chat;
 mod git_confirm;
 mod host_error;
 mod host_logging;
@@ -9686,6 +9687,10 @@ fn main() {
             rollback_update,
             open_external,
             grok_chat_apply_theme,
+            grok_chat::grok_chat_prepare,
+            grok_chat::grok_chat_login_status,
+            grok_chat::grok_chat_begin_browser_login,
+            grok_chat::grok_chat_sync_browser_session,
             open_media_external,
             start_project_preview,
             computer_use_env_enabled,
