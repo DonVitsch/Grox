@@ -7538,6 +7538,43 @@ fn open_external(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn grok_chat_apply_theme(app: tauri::AppHandle, css: String, color_scheme: String) -> Result<(), String> {
+    let Some(chat) = app.get_webview_window("grok-chat") else {
+        return Ok(());
+    };
+    let css_js = serde_json::to_string(&css).map_err(|error| error.to_string())?;
+    let scheme_js = serde_json::to_string(&color_scheme).map_err(|error| error.to_string())?;
+    let script = format!(
+        r#"(function(){{
+  try {{
+    document.documentElement.style.colorScheme = {scheme_js};
+    document.documentElement.dataset.colorScheme = {scheme_js};
+    document.documentElement.classList.toggle("dark", {scheme_js} === "dark");
+    document.documentElement.classList.toggle("light", {scheme_js} === "light");
+    try {{ localStorage.setItem("theme", {scheme_js}); }} catch (_) {{}}
+    var id = "grox-appearance";
+    var el = document.getElementById(id);
+    if (!el) {{
+      el = document.createElement("style");
+      el.id = id;
+      (document.head || document.documentElement).appendChild(el);
+    }}
+    el.textContent = {css_js};
+    if (!window.__groxAppearanceWatch) {{
+      window.__groxAppearanceWatch = true;
+      new MutationObserver(function() {{
+        if (!document.getElementById(id) && el) {{
+          (document.head || document.documentElement).appendChild(el);
+        }}
+      }}).observe(document.documentElement, {{ childList: true, subtree: true }});
+    }}
+  }} catch (_) {{}}
+}})();"#
+    );
+    chat.eval(&script).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_media_external(url: String) -> Result<(), String> {
     let parsed = parse_browser_url(&url).map_err(|error| format!("无效媒体链接：{error}"))?;
     if parsed.scheme() == "https" && !is_media_https_host_allowed(parsed.host_str()) {
@@ -9648,6 +9685,7 @@ fn main() {
             install_update,
             rollback_update,
             open_external,
+            grok_chat_apply_theme,
             open_media_external,
             start_project_preview,
             computer_use_env_enabled,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HOME_WORKSPACE_TABS } from "../components/home/workspaceTabs";
-import { boundsUsable, roundBounds } from "./grokWebChat";
+import { boundsUsable, buildGrokChatAppearanceCss, roundBounds } from "./grokWebChat";
 
 describe("home workspace tabs", () => {
   it("places web chat to the left of conversation", () => {
@@ -25,5 +25,22 @@ describe("grok web chat bounds", () => {
     });
     expect(boundsUsable({ x: 0, y: 0, width: 20, height: 400 })).toBe(false);
     expect(boundsUsable({ x: 0, y: 0, width: 800, height: 500 })).toBe(true);
+  });
+});
+
+describe("grok web appearance css", () => {
+  it("uses the current app color and font tokens", () => {
+    document.documentElement.dataset.theme = "dark";
+    document.documentElement.style.setProperty("--color-base", "#112233");
+    document.documentElement.style.setProperty("--color-fg", "#eeeeee");
+    document.documentElement.style.setProperty("--font-sans", '"PingFang SC", sans-serif');
+    document.documentElement.style.setProperty("--grox-prose-size", "16px");
+    const appearance = buildGrokChatAppearanceCss();
+    expect(appearance.colorScheme).toBe("dark");
+    expect(appearance.background).toBe("#112233");
+    expect(appearance.css).toContain("#112233");
+    expect(appearance.css).toContain("#eeeeee");
+    expect(appearance.css).toContain("PingFang SC");
+    expect(appearance.css).toContain("16px");
   });
 });

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "grok-chat-surface",
+  "description": "Embedded grok.com overlay. No Host commands.",
+  "windows": ["grok-chat"],
+  "permissions": []
+}

@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDesktop } from "../../state/store";
+import { usePreferences } from "../../state/preferences";
 import { useI18n } from "../../lib/i18n";
 import {
+  applyGrokChatAppearance,
   CHROME_OVERLAY_EVENT,
   GROK_WEB_URL,
   hideGrokWebChat,
@@ -25,6 +27,21 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
   const [error, setError] = useState("");
   const [embedded, setEmbedded] = useState(false);
   const overlay = settingsOpen || paletteOpen || accountSetupOpen || transientOverlay;
+
+  useLayoutEffect(() => {
+    const previous = usePreferences.getState().sidebarVisible;
+    if (previous) usePreferences.getState().setSidebarVisible(false, false);
+    return () => {
+      if (previous) usePreferences.getState().setSidebarVisible(true, false);
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsub = usePreferences.subscribe(() => {
+      void applyGrokChatAppearance();
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     const onOverlay = (event: Event) => setTransientOverlay(Boolean((event as CustomEvent<boolean>).detail));
@@ -62,10 +79,21 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
     const observer = new ResizeObserver(frame);
     observer.observe(host);
     window.addEventListener("resize", frame);
+    let unlistenMoved: (() => void) | undefined;
+    if (inTauri()) {
+      void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+        if (disposed) return;
+        void getCurrentWindow().onMoved(frame).then((unlisten) => {
+          if (disposed) unlisten();
+          else unlistenMoved = unlisten;
+        });
+      });
+    }
     return () => {
       disposed = true;
       observer.disconnect();
       window.removeEventListener("resize", frame);
+      unlistenMoved?.();
       void hideGrokWebChat();
     };
   }, [overlay]);
@@ -79,10 +107,10 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-base">
       <div className="home-nebula opacity-40" />
       <WorkspaceTabs mode={mode} onChange={onChange} />
-      <div className="relative z-[1] flex min-h-0 flex-1 flex-col px-3 pb-3 pt-16">
+      <div className="relative z-[1] flex min-h-0 flex-1 flex-col pt-16">
         <div
           ref={hostRef}
-          className="relative min-h-0 flex-1 overflow-hidden rounded-[12px] border border-line2 bg-void"
+          className="relative min-h-0 flex-1 overflow-hidden bg-base"
         >
           {(!embedded || error || overlay) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-8 text-center">

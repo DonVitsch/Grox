@@ -70,6 +70,14 @@ describe("visual appearance prefs", () => {
 });
 
 describe("sidebar visibility", () => {
+  it("can hide without persisting the operator preference", () => {
+    usePreferences.getState().setSidebarVisible(true, true);
+    expect(localStorage.getItem("grox.sidebarVisible")).toBe("1");
+    usePreferences.getState().setSidebarVisible(false, false);
+    expect(usePreferences.getState().sidebarVisible).toBe(false);
+    expect(localStorage.getItem("grox.sidebarVisible")).toBe("1");
+  });
+
   it("persists every toggle", () => {
     const initial = usePreferences.getState().sidebarVisible;
     usePreferences.getState().toggleSidebar();

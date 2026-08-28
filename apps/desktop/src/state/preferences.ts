@@ -70,6 +70,7 @@ interface PreferencesState {
   setFontWeight(fontWeight: number): void;
   setContentDensity(density: ContentDensity): void;
   toggleSidebar(): void;
+  setSidebarVisible(sidebarVisible: boolean, persist?: boolean): void;
   setSidebarWidth(width: number): void;
   setInspectorWidth(width: number): void;
   setPreviewWidth(width: number): void;
@@ -345,6 +346,10 @@ export const usePreferences = create<PreferencesState>((set, get) => ({
       localStorage.setItem("grox.sidebarVisible", sidebarVisible ? "1" : "0");
       return { sidebarVisible };
     });
+  },
+  setSidebarVisible(sidebarVisible, persist = true) {
+    if (persist) localStorage.setItem("grox.sidebarVisible", sidebarVisible ? "1" : "0");
+    set({ sidebarVisible });
   },
   setSidebarWidth(sidebarWidth) {
     const width = Math.min(380, Math.max(210, sidebarWidth));
