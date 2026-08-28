@@ -138,11 +138,30 @@ describe("layout adaptability — density isolation", () => {
 });
 
 describe("layout adaptability — chrome hard rules", () => {
-  it("settings shell uses fixed 15px chrome scale", () => {
+  it("settings shell follows interface scale, not transcript density", () => {
     const shell = blockFor(".settings-shell");
     expect(shell).toBeTruthy();
     expect(shell).not.toMatch(/--grox-content-max/);
-    expect(shell).toMatch(/font-size:\s*15px/);
+    expect(shell).toMatch(/font-size:\s*var\(--grox-ui-size/);
+  });
+
+  it("ui scale tiers only change chrome size tokens", () => {
+    for (const name of ["sm", "md", "lg", "xl"] as const) {
+      const body = blockFor(`html[data-ui="${name}"]`);
+      expect(body).toMatch(/--grox-ui-size\s*:\s*\d+px/);
+      expect(body).toMatch(/--grox-component-font-size\s*:\s*\d+px/);
+      expect(body).not.toMatch(/--grox-content-max/);
+      expect(body).not.toMatch(/--grox-prose-size/);
+    }
+  });
+
+  it("code scale is independent of transcript font tiers", () => {
+    for (const name of ["sm", "md", "lg", "xl"] as const) {
+      const font = blockFor(`html[data-font="${name}"]`);
+      expect(font).not.toMatch(/--grox-code-size/);
+      const code = blockFor(`html[data-code="${name}"]`);
+      expect(code).toMatch(/--grox-code-size\s*:\s*\d+px/);
+    }
   });
 
   it("lbl/chip stay fixed component size", () => {

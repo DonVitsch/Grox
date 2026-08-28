@@ -118,7 +118,7 @@ export function Sidebar({ onRequestHide }: { onRequestHide?: () => void } = {}) 
   }, [normalizedQuery, sessionSearchIdsKey]);
 
   return (
-    <aside className="relative flex shrink-0 flex-col border-r border-line bg-panel" style={{ width }}>
+    <aside className="ui-zoom relative flex shrink-0 flex-col border-r border-line bg-panel" style={{ width }}>
       <div className="flex h-14 items-center border-b border-line px-4">
         <button onClick={goHome} className="transition-opacity hover:opacity-70" title="Home">
           <Wordmark size={14} markSpin={view === "home" ? "slow" : false} />

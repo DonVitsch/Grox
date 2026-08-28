@@ -56,7 +56,7 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className={`titlebar relative z-40 flex h-10 shrink-0 items-center border-b border-line bg-void pr-2 select-none ${windows ? "pl-2" : "pl-[78px]"}`}
+      className={`titlebar ui-zoom relative z-40 flex shrink-0 items-center border-b border-line bg-void pr-2 select-none ${windows ? "pl-2" : "pl-[78px]"}`}
     >
       {!sidebarVisible && (
         <div

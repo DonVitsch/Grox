@@ -20,6 +20,17 @@ import {
   settingsSectionFromHash,
   type SettingsSection,
 } from "../../lib/settingsCatalog";
+import {
+  CODE_FONTS,
+  COLOR_PRESETS,
+  COLOR_SLOTS,
+  THEME_DEFAULT_COLORS,
+  UI_FONTS,
+  isHexColor,
+  type ColorSlotId,
+  type CodeFontId,
+  type UiFontId,
+} from "../../lib/appearance";
 
 type Json = Record<string, unknown>;
 
@@ -608,48 +619,228 @@ function ProviderAndModels() {
 
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-[5px] border border-line bg-high/60 p-3"><p className="lbl !text-[9.5px]">{label}</p><p className="mt-2 font-mono text-[11px] text-fg2">{value}</p></div>; }
 
+function Subhead({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="mt-7 mb-1 border-b border-line pb-2">
+      <h3 className="text-[13px] text-fg">{title}</h3>
+      {hint && <p className="mt-0.5 text-[11.5px] leading-relaxed text-dim">{hint}</p>}
+    </div>
+  );
+}
+
+function SizeChoices({
+  value,
+  onChange,
+  zh,
+}: {
+  value: "sm" | "md" | "lg" | "xl";
+  onChange(value: "sm" | "md" | "lg" | "xl"): void;
+  zh: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <Choice active={value === "sm"} onClick={() => onChange("sm")}>{zh ? "小" : "S"}</Choice>
+      <Choice active={value === "md"} onClick={() => onChange("md")}>{zh ? "默认" : "M"}</Choice>
+      <Choice active={value === "lg"} onClick={() => onChange("lg")}>{zh ? "大" : "L"}</Choice>
+      <Choice active={value === "xl"} onClick={() => onChange("xl")}>{zh ? "更大" : "XL"}</Choice>
+    </div>
+  );
+}
+
+function ColorField({
+  label,
+  slot,
+  value,
+  fallback,
+  onChange,
+}: {
+  label: string;
+  slot: ColorSlotId;
+  value: string | undefined;
+  fallback: string;
+  onChange(slot: ColorSlotId, value: string | undefined): void;
+}) {
+  const hex = value ?? fallback;
+  const [draft, setDraft] = useState(hex);
+  useEffect(() => { setDraft(hex); }, [hex]);
+  const commit = (next: string) => {
+    const trimmed = next.trim();
+    if (trimmed === "") {
+      onChange(slot, undefined);
+      return;
+    }
+    const normalized = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+    if (isHexColor(normalized)) onChange(slot, normalized.toLowerCase());
+  };
+  return (
+    <label className="flex flex-col gap-1.5 rounded-[8px] border border-line2 bg-raise p-3">
+      <span className="text-[11px] text-fg2">{label}</span>
+      <div className="flex items-center gap-2">
+        <input
+          type="color"
+          aria-label={label}
+          value={isHexColor(hex) ? hex : fallback}
+          onChange={(event) => onChange(slot, event.target.value.toLowerCase())}
+          className="grox-color h-8 w-8 shrink-0 cursor-pointer rounded-[5px] border border-line2 bg-transparent"
+        />
+        <input
+          value={draft}
+          spellCheck={false}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            const next = event.target.value.trim();
+            if (isHexColor(next)) onChange(slot, next.toLowerCase());
+          }}
+          onBlur={() => commit(draft)}
+          className="h-8 min-w-0 flex-1 rounded-[4px] border border-line2 bg-void px-2 font-mono text-[10px] text-fg outline-none focus:border-acc-dim"
+        />
+        {value && (
+          <button type="button" onClick={() => onChange(slot, undefined)} className="text-[10px] text-faint hover:text-fg">
+            reset
+          </button>
+        )}
+      </div>
+    </label>
+  );
+}
+
 function Appearance() {
   const { t, language: uiLanguage } = useI18n();
+  const zh = uiLanguage === "zh-CN";
   const language = usePreferences((state) => state.language);
   const setLanguage = usePreferences((state) => state.setLanguage);
   const theme = usePreferences((state) => state.theme);
   const setTheme = usePreferences((state) => state.setTheme);
   const fontScale = usePreferences((state) => state.fontScale);
   const setFontScale = usePreferences((state) => state.setFontScale);
+  const uiScale = usePreferences((state) => state.uiScale);
+  const setUiScale = usePreferences((state) => state.setUiScale);
+  const codeScale = usePreferences((state) => state.codeScale);
+  const setCodeScale = usePreferences((state) => state.setCodeScale);
+  const uiFont = usePreferences((state) => state.uiFont);
+  const setUiFont = usePreferences((state) => state.setUiFont);
+  const codeFont = usePreferences((state) => state.codeFont);
+  const setCodeFont = usePreferences((state) => state.setCodeFont);
+  const uiFontCustom = usePreferences((state) => state.uiFontCustom);
+  const setUiFontCustom = usePreferences((state) => state.setUiFontCustom);
+  const codeFontCustom = usePreferences((state) => state.codeFontCustom);
+  const setCodeFontCustom = usePreferences((state) => state.setCodeFontCustom);
+  const colorOverrides = usePreferences((state) => state.colorOverrides);
+  const setColorSlot = usePreferences((state) => state.setColorSlot);
+  const setColorPreset = usePreferences((state) => state.setColorPreset);
+  const resetColors = usePreferences((state) => state.resetColors);
+  const resetVisuals = usePreferences((state) => state.resetVisuals);
   const fontWeight = usePreferences((state) => state.fontWeight);
   const setFontWeight = usePreferences((state) => state.setFontWeight);
   const contentDensity = usePreferences((state) => state.contentDensity);
   const setContentDensity = usePreferences((state) => state.setContentDensity);
   const [reduceMotion, setReduceMotion] = useState(localStorage.getItem("grok.pref.reduceMotion") === "1");
   const updateMotion = (value: boolean) => { localStorage.setItem("grok.pref.reduceMotion", value ? "1" : "0"); document.documentElement.dataset.reduceMotion = value ? "1" : "0"; window.dispatchEvent(new Event("grox-motion-change")); setReduceMotion(value); };
-  return <div><Heading title={t("appearance")} description={uiLanguage === "zh-CN" ? "语言默认为中文，主题默认为 GrokNight 暗黑模式。" : "The default language is Chinese and the default theme is GrokNight dark."} />
-    <Row label={t("language")}><div className="flex gap-1"><Choice active={language === "zh-CN"} onClick={() => setLanguage("zh-CN")}>{t("chinese")}</Choice><Choice active={language === "en-US"} onClick={() => setLanguage("en-US")}>{t("english")}</Choice></div></Row>
-    <Row label={t("theme")}><div className="flex gap-1"><Choice active={theme === "dark"} onClick={() => setTheme("dark")}><Icon name="moon" size={10} /> {t("dark")}</Choice><Choice active={theme === "light"} onClick={() => setTheme("light")}><Icon name="sun" size={10} /> {t("light")}</Choice></div></Row>
-    <Row
-      label={uiLanguage === "zh-CN" ? "阅读栏宽度" : "Reading width"}
-      hint={uiLanguage === "zh-CN" ? "仅改会话正文与输入框最大宽度（720 / 920 / 1120 / 铺满）；行距、内边距、侧栏与按钮不变。" : "Transcript + composer max-width only (720 / 920 / 1120 / fill). Spacing and chrome never change."}
-    >
-      <div className="flex flex-wrap gap-1">
-        <Choice active={contentDensity === "narrow"} onClick={() => setContentDensity("narrow")}>{uiLanguage === "zh-CN" ? "窄" : "Narrow"}</Choice>
-        <Choice active={contentDensity === "medium"} onClick={() => setContentDensity("medium")}>{uiLanguage === "zh-CN" ? "中" : "Medium"}</Choice>
-        <Choice active={contentDensity === "wide"} onClick={() => setContentDensity("wide")}>{uiLanguage === "zh-CN" ? "宽" : "Wide"}</Choice>
-        <Choice active={contentDensity === "fill"} onClick={() => setContentDensity("fill")}>{uiLanguage === "zh-CN" ? "铺满" : "Fill"}</Choice>
+  const currentColors = colorOverrides[theme];
+  const defaults = THEME_DEFAULT_COLORS[theme];
+  return (
+    <div>
+      <Heading title={t("appearance")} description={zh ? "语言、主题、界面尺寸、字体和颜色都可以改。改完立即生效，保存在本机。" : "Language, theme, chrome size, fonts, and colors. Changes apply immediately and stay on this machine."} />
+      <Row label={t("language")}><div className="flex gap-1"><Choice active={language === "zh-CN"} onClick={() => setLanguage("zh-CN")}>{t("chinese")}</Choice><Choice active={language === "en-US"} onClick={() => setLanguage("en-US")}>{t("english")}</Choice></div></Row>
+      <Row label={t("theme")}><div className="flex gap-1"><Choice active={theme === "dark"} onClick={() => setTheme("dark")}><Icon name="moon" size={10} /> {t("dark")}</Choice><Choice active={theme === "light"} onClick={() => setTheme("light")}><Icon name="sun" size={10} /> {t("light")}</Choice></div></Row>
+      <Row
+        label={zh ? "阅读栏宽度" : "Reading width"}
+        hint={zh ? "仅改会话正文与输入框最大宽度（720 / 920 / 1120 / 铺满）；行距、内边距不变。" : "Transcript + composer max-width only (720 / 920 / 1120 / fill). Spacing never changes."}
+      >
+        <div className="flex flex-wrap gap-1">
+          <Choice active={contentDensity === "narrow"} onClick={() => setContentDensity("narrow")}>{zh ? "窄" : "Narrow"}</Choice>
+          <Choice active={contentDensity === "medium"} onClick={() => setContentDensity("medium")}>{zh ? "中" : "Medium"}</Choice>
+          <Choice active={contentDensity === "wide"} onClick={() => setContentDensity("wide")}>{zh ? "宽" : "Wide"}</Choice>
+          <Choice active={contentDensity === "fill"} onClick={() => setContentDensity("fill")}>{zh ? "铺满" : "Fill"}</Choice>
+        </div>
+      </Row>
+
+      <Subhead title={zh ? "尺寸" : "Size"} hint={zh ? "正文、界面、代码字号分开调。" : "Transcript, chrome, and code size are independent."} />
+      <Row
+        label={zh ? "正文大小" : "Reading size"}
+        hint={zh ? "对话回复与输入框。" : "Transcript replies and the composer."}
+      >
+        <SizeChoices value={fontScale} onChange={setFontScale} zh={zh} />
+      </Row>
+      <Row
+        label={zh ? "界面大小" : "Interface size"}
+        hint={zh ? "侧栏、标题栏、状态栏、设置和按钮。" : "Sidebar, title bar, status bar, settings, and buttons."}
+      >
+        <SizeChoices value={uiScale} onChange={setUiScale} zh={zh} />
+      </Row>
+      <Row
+        label={zh ? "代码大小" : "Code size"}
+        hint={zh ? "代码块与等宽文字。未单独设置时跟随正文大小。" : "Fenced code and monospace. Follows reading size until you change it."}
+      >
+        <SizeChoices value={codeScale} onChange={setCodeScale} zh={zh} />
+      </Row>
+      <Row label={zh ? "字体粗细" : "Font weight"} hint={zh ? "建议 400 以获得更清晰的 WebView 渲染。" : "400 is usually sharpest in WebView2."}><RangeControl value={fontWeight} min={400} max={700} step={25} display={String(fontWeight)} onChange={setFontWeight} label={zh ? "字体粗细" : "Font weight"} /></Row>
+
+      <Subhead title={zh ? "字体" : "Fonts"} hint={zh ? "未安装的字体不会生效，可在自定义里填本机字体名。" : "Missing fonts fall back. Type a local family name to override."} />
+      <Row label={zh ? "界面字体" : "UI font"}>
+        <ChipSelect
+          label={UI_FONTS.find((font) => font.id === uiFont)?.[zh ? "zh" : "en"] ?? uiFont}
+          items={UI_FONTS.map((font) => ({ id: font.id, label: zh ? font.zh : font.en }))}
+          activeId={uiFont}
+          onSelect={(id) => setUiFont(id as UiFontId)}
+          variant="field"
+          menuPlacement="down"
+          width={220}
+          aria-label={zh ? "界面字体" : "UI font"}
+        />
+      </Row>
+      <Row label={zh ? "代码字体" : "Code font"}>
+        <ChipSelect
+          label={CODE_FONTS.find((font) => font.id === codeFont)?.[zh ? "zh" : "en"] ?? codeFont}
+          items={CODE_FONTS.map((font) => ({ id: font.id, label: zh ? font.zh : font.en }))}
+          activeId={codeFont}
+          onSelect={(id) => setCodeFont(id as CodeFontId)}
+          variant="field"
+          menuPlacement="down"
+          width={220}
+          aria-label={zh ? "代码字体" : "Code font"}
+        />
+      </Row>
+      <Row label={zh ? "自定义界面字体" : "Custom UI font"} hint={zh ? "例如 PingFang SC、LXGW WenKai。留空则用上方选择。" : "e.g. PingFang SC, Inter. Leave empty to use the preset."}>
+        <div className="w-[220px]"><Input value={uiFontCustom} onChange={setUiFontCustom} placeholder={zh ? "本机字体名" : "Local family name"} /></div>
+      </Row>
+      <Row label={zh ? "自定义代码字体" : "Custom code font"} hint={zh ? "例如 JetBrains Mono、Sarasa Mono SC。" : "e.g. JetBrains Mono, Sarasa Mono SC."}>
+        <div className="w-[220px]"><Input value={codeFontCustom} onChange={setCodeFontCustom} placeholder={zh ? "本机等宽字体" : "Local mono family"} /></div>
+      </Row>
+      <div className="mt-3 rounded-[8px] border border-line2 bg-raise px-4 py-3">
+        <p className="text-[13px] text-fg" style={{ fontFamily: "var(--font-sans)" }}>{zh ? "界面预览 · Grox 从痛点写到成品" : "UI preview · Grox from a snag to a build"}</p>
+        <p className="mt-1 font-mono text-[12px] text-fg2" style={{ fontFamily: "var(--font-mono)" }}>{'fn main() { println!("ok"); }'}</p>
       </div>
-    </Row>
-    <Row
-      label={uiLanguage === "zh-CN" ? "正文大小" : "Reading size"}
-      hint={uiLanguage === "zh-CN" ? "仅调整对话正文（整数像素）；侧栏、标题栏、按钮字号固定，避免布局错位与模糊。" : "Integer sizes for transcript only. Sidebar, title bar, and buttons stay fixed for sharp layout."}
-    >
-      <div className="flex flex-wrap gap-1">
-        <Choice active={fontScale === "sm"} onClick={() => setFontScale("sm")}>{uiLanguage === "zh-CN" ? "小" : "S"}</Choice>
-        <Choice active={fontScale === "md"} onClick={() => setFontScale("md")}>{uiLanguage === "zh-CN" ? "默认" : "M"}</Choice>
-        <Choice active={fontScale === "lg"} onClick={() => setFontScale("lg")}>{uiLanguage === "zh-CN" ? "大" : "L"}</Choice>
-        <Choice active={fontScale === "xl"} onClick={() => setFontScale("xl")}>{uiLanguage === "zh-CN" ? "更大" : "XL"}</Choice>
+
+      <Subhead title={zh ? "颜色" : "Colors"} hint={zh ? "只改当前主题。切深浅色后各自记住一套。" : "Stored per theme. Dark and light keep separate palettes."} />
+      <Row label={zh ? "配色预设" : "Presets"}>
+        <div className="flex max-w-[360px] flex-wrap justify-end gap-1">
+          {COLOR_PRESETS.map((preset) => (
+            <Choice key={preset.id} active={false} onClick={() => setColorPreset(preset.colors)}>{zh ? preset.zh : preset.en}</Choice>
+          ))}
+        </div>
+      </Row>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {COLOR_SLOTS.map((slot) => (
+          <ColorField
+            key={slot.id}
+            slot={slot.id}
+            label={zh ? slot.zh : slot.en}
+            value={currentColors[slot.id]}
+            fallback={defaults[slot.id]}
+            onChange={setColorSlot}
+          />
+        ))}
       </div>
-    </Row>
-    <Row label={uiLanguage === "zh-CN" ? "字体粗细" : "Font weight"} hint={uiLanguage === "zh-CN" ? "建议 400 以获得更清晰的 WebView 渲染。" : "400 is usually sharpest in WebView2."}><RangeControl value={fontWeight} min={400} max={700} step={25} display={String(fontWeight)} onChange={setFontWeight} label={uiLanguage === "zh-CN" ? "字体粗细" : "Font weight"} /></Row>
-    <Row label={uiLanguage === "zh-CN" ? "减少动态效果" : "Reduce motion"} hint={uiLanguage === "zh-CN" ? "停用轨道动画和进入过渡。" : "Disable orbital animations and entrance transitions."}><Toggle label={uiLanguage === "zh-CN" ? "减少动态效果" : "Reduce motion"} on={reduceMotion} onChange={updateMotion} /></Row>
-  </div>;
+      <div className="mt-3 flex justify-end gap-2">
+        <ActionButton onClick={resetColors}>{zh ? "恢复当前主题颜色" : "Reset this theme's colors"}</ActionButton>
+        <ActionButton onClick={resetVisuals}>{zh ? "恢复默认外观" : "Reset appearance"}</ActionButton>
+      </div>
+
+      <Subhead title={zh ? "动效" : "Motion"} />
+      <Row label={zh ? "减少动态效果" : "Reduce motion"} hint={zh ? "停用轨道动画和进入过渡。" : "Disable orbital animations and entrance transitions."}><Toggle label={zh ? "减少动态效果" : "Reduce motion"} on={reduceMotion} onChange={updateMotion} /></Row>
+    </div>
+  );
 }
 
 function Choice({ active, onClick, children }: { active: boolean; onClick(): void; children: React.ReactNode }) { return <button aria-pressed={active} onClick={onClick} className={`flex h-8 items-center gap-1.5 rounded-[4px] border px-3 font-mono text-[9.5px] ${active ? "border-acc-dim bg-acc-wash text-acc" : "border-line2 text-dim"}`}>{children}</button>; }

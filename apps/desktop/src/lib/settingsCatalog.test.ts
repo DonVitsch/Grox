@@ -11,6 +11,8 @@ describe("settingsCatalog", () => {
     const catalog = getSettingsCatalog(true);
     expect(searchSettings(catalog, "CLI").map((entry) => entry.section)).toContain("general");
     expect(searchSettings(catalog, "登录").map((entry) => entry.section)).toEqual(["account"]);
+    expect(searchSettings(catalog, "颜色").map((entry) => entry.section)).toContain("appearance");
+    expect(searchSettings(catalog, "界面").map((entry) => entry.section)).toContain("appearance");
     expect(searchSettings(catalog, "不存在")).toEqual([]);
   });
 

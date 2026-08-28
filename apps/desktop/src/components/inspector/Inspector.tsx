@@ -37,7 +37,7 @@ export function Inspector() {
   return (
     <>
     <ResizeHandle side="left" value={width} onChange={setWidth} />
-    <aside className="flex shrink-0 flex-col border-l border-line bg-panel" style={{ width }}>
+    <aside className="ui-zoom flex shrink-0 flex-col border-l border-line bg-panel" style={{ width }}>
       {/* tab strip */}
       <div role="tablist" aria-label={language === "zh-CN" ? "检查器" : "Inspector"} className="flex h-10 shrink-0 items-center gap-1 border-b border-line px-3">
         {tabs.map((t) => (

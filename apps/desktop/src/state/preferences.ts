@@ -1,4 +1,24 @@
 import { create } from "zustand";
+import {
+  applyColorOverrides,
+  applyFonts,
+  applyUiScale,
+  applyCodeScale,
+  emptyColorOverrides,
+  parseCodeFont,
+  parseCodeScale,
+  parseColorOverrides,
+  parseUiFont,
+  parseUiScale,
+  sanitizeFontName,
+  type CodeFontId,
+  type CodeScale,
+  type ColorSlotId,
+  type SlotColors,
+  type ThemeColorOverrides,
+  type UiFontId,
+  type UiScale,
+} from "../lib/appearance";
 
 export type Language = "zh-CN" | "en-US";
 export type Theme = "dark" | "light";
@@ -6,10 +26,10 @@ export type Theme = "dark" | "light";
 export type ContentDensity = "narrow" | "medium" | "wide" | "fill";
 /**
  * Transcript font scale only — integer CSS px tiers.
- * Never applied to chrome (sidebar / titlebar / fixed-height chips) to avoid
- * layout overflow and sub-pixel blur.
+ * Chrome uses uiScale; code blocks use codeScale.
  */
 export type FontScale = "sm" | "md" | "lg" | "xl";
+export type { UiScale, CodeScale, UiFontId, CodeFontId, ThemeColorOverrides, ColorSlotId };
 
 interface PreferencesState {
   language: Language;
@@ -17,6 +37,15 @@ interface PreferencesState {
   /** @deprecated kept for migration; use fontScale */
   fontSize: number;
   fontScale: FontScale;
+  uiScale: UiScale;
+  codeScale: CodeScale;
+  /** True until the user sets code size independently. */
+  codeScaleFollowsFont: boolean;
+  uiFont: UiFontId;
+  codeFont: CodeFontId;
+  uiFontCustom: string;
+  codeFontCustom: string;
+  colorOverrides: ThemeColorOverrides;
   fontWeight: number;
   contentDensity: ContentDensity;
   sidebarVisible: boolean;
@@ -28,6 +57,16 @@ interface PreferencesState {
   setFontScale(scale: FontScale): void;
   /** Maps legacy numeric offsets to discrete scales. */
   setFontSize(fontSize: number): void;
+  setUiScale(scale: UiScale): void;
+  setCodeScale(scale: CodeScale): void;
+  setUiFont(font: UiFontId): void;
+  setCodeFont(font: CodeFontId): void;
+  setUiFontCustom(value: string): void;
+  setCodeFontCustom(value: string): void;
+  setColorSlot(slot: ColorSlotId, value: string | undefined): void;
+  setColorPreset(colors: SlotColors): void;
+  resetColors(): void;
+  resetVisuals(): void;
   setFontWeight(fontWeight: number): void;
   setContentDensity(density: ContentDensity): void;
   toggleSidebar(): void;
@@ -104,6 +143,16 @@ const initialFontScale = (() => {
   return parseFontScale(localStorage.getItem("grox.fontSize"));
 })();
 
+const storedCodeScale = localStorage.getItem("grox.codeScale");
+const initialCodeScaleFollowsFont = storedCodeScale === null;
+const initialCodeScale = initialCodeScaleFollowsFont ? initialFontScale : parseCodeScale(storedCodeScale);
+const initialUiScale = parseUiScale(localStorage.getItem("grox.uiScale"));
+const initialUiFont = parseUiFont(localStorage.getItem("grox.uiFont"));
+const initialCodeFont = parseCodeFont(localStorage.getItem("grox.codeFont"));
+const initialUiFontCustom = sanitizeFontName(localStorage.getItem("grox.uiFontCustom") ?? "");
+const initialCodeFontCustom = sanitizeFontName(localStorage.getItem("grox.codeFontCustom") ?? "");
+const initialColorOverrides = parseColorOverrides(localStorage.getItem("grox.colorOverrides"));
+
 const initialFontWeight = (() => {
   const value = localStorage.getItem("grox.fontWeight");
   if (value === "regular") return 400;
@@ -115,21 +164,45 @@ const initialFontWeight = (() => {
 })();
 const initialContentDensity = parseContentDensity(localStorage.getItem("grox.contentDensity"));
 
+const persistColors = (overrides: ThemeColorOverrides) => {
+  localStorage.setItem("grox.colorOverrides", JSON.stringify(overrides));
+};
+
+const persistFonts = (uiFont: UiFontId, codeFont: CodeFontId, uiCustom: string, codeCustom: string) => {
+  localStorage.setItem("grox.uiFont", uiFont);
+  localStorage.setItem("grox.codeFont", codeFont);
+  localStorage.setItem("grox.uiFontCustom", uiCustom);
+  localStorage.setItem("grox.codeFontCustom", codeCustom);
+  applyFonts(uiFont, codeFont, uiCustom, codeCustom);
+};
+
 document.documentElement.dataset.theme = initialTheme;
 document.documentElement.dataset.density = initialContentDensity;
 document.documentElement.lang = initialLanguage;
 applyFontScale(initialFontScale);
+applyUiScale(initialUiScale);
+applyCodeScale(initialCodeScale);
+applyFonts(initialUiFont, initialCodeFont, initialUiFontCustom, initialCodeFontCustom);
+applyColorOverrides(initialTheme, initialColorOverrides);
 document.documentElement.style.setProperty("--grox-font-weight", String(initialFontWeight));
 // One-shot: persist discrete scale if user still has fractional legacy value.
 if (!localStorage.getItem("grox.fontScale")) {
   localStorage.setItem("grox.fontScale", initialFontScale);
 }
 
-export const usePreferences = create<PreferencesState>((set) => ({
+export const usePreferences = create<PreferencesState>((set, get) => ({
   language: initialLanguage,
   theme: initialTheme,
   fontSize: fontScaleToRank(initialFontScale),
   fontScale: initialFontScale,
+  uiScale: initialUiScale,
+  codeScale: initialCodeScale,
+  codeScaleFollowsFont: initialCodeScaleFollowsFont,
+  uiFont: initialUiFont,
+  codeFont: initialCodeFont,
+  uiFontCustom: initialUiFontCustom,
+  codeFontCustom: initialCodeFontCustom,
+  colorOverrides: initialColorOverrides,
   fontWeight: initialFontWeight,
   contentDensity: initialContentDensity,
   sidebarVisible: localStorage.getItem("grox.sidebarVisible") !== "0",
@@ -144,6 +217,7 @@ export const usePreferences = create<PreferencesState>((set) => ({
   setTheme(theme) {
     localStorage.setItem("grox.theme", theme);
     document.documentElement.dataset.theme = theme;
+    applyColorOverrides(theme, get().colorOverrides);
     set({ theme });
   },
   setFontScale(scale) {
@@ -151,15 +225,107 @@ export const usePreferences = create<PreferencesState>((set) => ({
     localStorage.setItem("grox.fontScale", value);
     localStorage.setItem("grox.fontSize", value); // keep legacy key in sync as label
     applyFontScale(value);
-    set({ fontScale: value, fontSize: fontScaleToRank(value) });
+    const follow = get().codeScaleFollowsFont;
+    if (follow) applyCodeScale(value);
+    set({
+      fontScale: value,
+      fontSize: fontScaleToRank(value),
+      ...(follow ? { codeScale: value } : {}),
+    });
   },
   setFontSize(fontSize) {
     // Accept old numeric API → discrete scale.
-    const value = parseFontScale(String(fontSize));
-    localStorage.setItem("grox.fontScale", value);
-    localStorage.setItem("grox.fontSize", value);
-    applyFontScale(value);
-    set({ fontScale: value, fontSize: fontScaleToRank(value) });
+    get().setFontScale(parseFontScale(String(fontSize)));
+  },
+  setUiScale(scale) {
+    const value = parseUiScale(scale);
+    localStorage.setItem("grox.uiScale", value);
+    applyUiScale(value);
+    set({ uiScale: value });
+  },
+  setCodeScale(scale) {
+    const value = parseCodeScale(scale);
+    localStorage.setItem("grox.codeScale", value);
+    applyCodeScale(value);
+    set({ codeScale: value, codeScaleFollowsFont: false });
+  },
+  setUiFont(font) {
+    const uiFont = parseUiFont(font);
+    persistFonts(uiFont, get().codeFont, get().uiFontCustom, get().codeFontCustom);
+    set({ uiFont });
+  },
+  setCodeFont(font) {
+    const codeFont = parseCodeFont(font);
+    persistFonts(get().uiFont, codeFont, get().uiFontCustom, get().codeFontCustom);
+    set({ codeFont });
+  },
+  setUiFontCustom(value) {
+    const uiFontCustom = sanitizeFontName(value);
+    persistFonts(get().uiFont, get().codeFont, uiFontCustom, get().codeFontCustom);
+    set({ uiFontCustom });
+  },
+  setCodeFontCustom(value) {
+    const codeFontCustom = sanitizeFontName(value);
+    persistFonts(get().uiFont, get().codeFont, get().uiFontCustom, codeFontCustom);
+    set({ codeFontCustom });
+  },
+  setColorSlot(slot, value) {
+    const theme = get().theme;
+    const next: ThemeColorOverrides = {
+      dark: { ...get().colorOverrides.dark },
+      light: { ...get().colorOverrides.light },
+    };
+    if (value && /^#([0-9a-fA-F]{6})$/.test(value)) next[theme][slot] = value.toLowerCase();
+    else delete next[theme][slot];
+    persistColors(next);
+    applyColorOverrides(theme, next);
+    set({ colorOverrides: next });
+  },
+  setColorPreset(colors) {
+    const theme = get().theme;
+    const next: ThemeColorOverrides = {
+      dark: { ...get().colorOverrides.dark },
+      light: { ...get().colorOverrides.light },
+    };
+    next[theme] = { ...colors };
+    persistColors(next);
+    applyColorOverrides(theme, next);
+    set({ colorOverrides: next });
+  },
+  resetColors() {
+    const theme = get().theme;
+    const next: ThemeColorOverrides = {
+      dark: { ...get().colorOverrides.dark },
+      light: { ...get().colorOverrides.light },
+    };
+    next[theme] = {};
+    persistColors(next);
+    applyColorOverrides(theme, next);
+    set({ colorOverrides: next });
+  },
+  resetVisuals() {
+    localStorage.removeItem("grox.uiScale");
+    localStorage.removeItem("grox.codeScale");
+    localStorage.removeItem("grox.uiFont");
+    localStorage.removeItem("grox.codeFont");
+    localStorage.removeItem("grox.uiFontCustom");
+    localStorage.removeItem("grox.codeFontCustom");
+    localStorage.removeItem("grox.colorOverrides");
+    const fontScale = get().fontScale;
+    applyUiScale("md");
+    applyCodeScale(fontScale);
+    applyFonts("geist", "geist", "", "");
+    applyColorOverrides(get().theme, emptyColorOverrides());
+    set({
+      uiScale: "md",
+      codeScale: fontScale,
+      codeScaleFollowsFont: true,
+      uiFont: "geist",
+      codeFont: "geist",
+      uiFontCustom: "",
+      codeFontCustom: "",
+      colorOverrides: emptyColorOverrides(),
+    });
   },
   setFontWeight(fontWeight) {
     const value = clampFontWeight(fontWeight);

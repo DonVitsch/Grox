@@ -34,6 +34,41 @@ describe("fontScaleToRank", () => {
   });
 });
 
+describe("visual appearance prefs", () => {
+  it("stores ui scale on html and localStorage", () => {
+    usePreferences.getState().setUiScale("xl");
+    expect(usePreferences.getState().uiScale).toBe("xl");
+    expect(localStorage.getItem("grox.uiScale")).toBe("xl");
+    expect(document.documentElement.dataset.ui).toBe("xl");
+  });
+
+  it("keeps code size following reading size until set independently", () => {
+    usePreferences.getState().resetVisuals();
+    usePreferences.getState().setFontScale("lg");
+    expect(usePreferences.getState().codeScale).toBe("lg");
+    expect(usePreferences.getState().codeScaleFollowsFont).toBe(true);
+    expect(localStorage.getItem("grox.codeScale")).toBeNull();
+
+    usePreferences.getState().setCodeScale("sm");
+    expect(usePreferences.getState().codeScaleFollowsFont).toBe(false);
+    usePreferences.getState().setFontScale("xl");
+    expect(usePreferences.getState().codeScale).toBe("sm");
+    expect(document.documentElement.dataset.code).toBe("sm");
+  });
+
+  it("applies a color slot only on the active theme", () => {
+    usePreferences.getState().setTheme("dark");
+    usePreferences.getState().setColorSlot("base", "#123456");
+    expect(usePreferences.getState().colorOverrides.dark.base).toBe("#123456");
+    expect(document.documentElement.style.getPropertyValue("--color-base")).toBe("#123456");
+
+    usePreferences.getState().setTheme("light");
+    expect(document.documentElement.style.getPropertyValue("--color-base")).toBe("");
+    usePreferences.getState().setTheme("dark");
+    expect(document.documentElement.style.getPropertyValue("--color-base")).toBe("#123456");
+  });
+});
+
 describe("sidebar visibility", () => {
   it("persists every toggle", () => {
     const initial = usePreferences.getState().sidebarVisible;

@@ -52,7 +52,7 @@ export function WorkbenchPanel() {
   return (
     <>
     <ResizeHandle side="left" value={width} onChange={setWidth} />
-    <aside className="flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line2 bg-void animate-fade-up" style={{ width }}>
+    <aside className="ui-zoom flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line2 bg-void animate-fade-up" style={{ width }}>
       <div className="flex h-11 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
         <button
           onClick={() => setTab("terminal")}

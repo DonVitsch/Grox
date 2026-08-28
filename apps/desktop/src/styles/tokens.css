@@ -92,9 +92,16 @@
 html {
   --grox-font-weight: 400;
   --grox-component-font-size: 12px;
+  --grox-ui-scale: 1;
+  --grox-ui-size: 15px;
+  --grox-titlebar-h: 40px;
+  --grox-chip-h: 28px;
+  --grox-statusbar-h: 32px;
+  --color-code-bg: var(--color-void);
+  --color-code-fg: var(--color-fg2);
   /*
    * Transcript-only integer tiers (default = md).
-   * Compact type + tight leading for long Chinese replies; chrome untouched.
+   * Chrome uses data-ui; fenced/inline code uses data-code.
    */
   --grox-prose-size: 14px;
   --grox-prose-leading: 1.5;
@@ -120,28 +127,71 @@ html[data-font="sm"] {
   --grox-prose-leading: 1.45;
   --grox-user-size: 12px;
   --grox-process-size: 11px;
-  --grox-code-size: 11px;
 }
 html[data-font="md"] {
   --grox-prose-size: 14px;
   --grox-prose-leading: 1.5;
   --grox-user-size: 13px;
   --grox-process-size: 12px;
-  --grox-code-size: 12px;
 }
 html[data-font="lg"] {
   --grox-prose-size: 15px;
   --grox-prose-leading: 1.55;
   --grox-user-size: 14px;
   --grox-process-size: 13px;
-  --grox-code-size: 13px;
 }
 html[data-font="xl"] {
   --grox-prose-size: 16px;
   --grox-prose-leading: 1.6;
   --grox-user-size: 15px;
   --grox-process-size: 14px;
-  --grox-code-size: 14px;
+}
+
+html[data-ui="sm"] {
+  --grox-ui-scale: 0.9;
+  --grox-ui-size: 13px;
+  --grox-component-font-size: 11px;
+}
+html[data-ui="md"] {
+  --grox-ui-scale: 1;
+  --grox-ui-size: 15px;
+  --grox-component-font-size: 12px;
+}
+html[data-ui="lg"] {
+  --grox-ui-scale: 1.1;
+  --grox-ui-size: 16px;
+  --grox-component-font-size: 13px;
+}
+html[data-ui="xl"] {
+  --grox-ui-scale: 1.2;
+  --grox-ui-size: 17px;
+  --grox-component-font-size: 14px;
+}
+
+html[data-code="sm"] {
+  --grox-code-size: 11px;
+}
+html[data-code="md"] {
+  --grox-code-size: 12px;
+}
+html[data-code="lg"] {
+  --grox-code-size: 13px;
+}
+html[data-code="xl"] {
+  --grox-code-size: 15px;
+}
+
+html[data-custom-acc="1"] {
+  --color-acc-deep: color-mix(in srgb, var(--color-acc) 78%, black);
+  --color-acc-dim: color-mix(in srgb, var(--color-acc) 48%, var(--color-mute));
+  --color-acc-wash: color-mix(in srgb, var(--color-acc) 14%, var(--color-raise));
+  --color-glow: color-mix(in srgb, var(--color-acc) 18%, transparent);
+}
+html[data-custom-fg="1"] {
+  --color-fg2: color-mix(in srgb, var(--color-fg) 82%, var(--color-base));
+  --color-mute: color-mix(in srgb, var(--color-fg) 62%, var(--color-base));
+  --color-dim: color-mix(in srgb, var(--color-fg) 48%, var(--color-base));
+  --color-faint: color-mix(in srgb, var(--color-fg) 32%, var(--color-base));
 }
 
 /* Density: column width only (padding/gap fixed). */
@@ -167,7 +217,7 @@ html[data-density="fill"] {
 }
 
 body {
-  font-size: 15px;
+  font-size: var(--grox-ui-size, 15px);
   font-weight: var(--grox-font-weight, 400);
   /* Crisp rasterization in WebView2 — avoid synthetic bold + subpixel mush. */
   -webkit-font-smoothing: antialiased;
@@ -178,10 +228,10 @@ body {
   font-weight: var(--grox-font-weight, 400);
 }
 
-/* Settings: fixed chrome scale — independent of transcript font tier. */
+/* Settings chrome follows interface scale, not transcript font tier. */
 .settings-shell {
   --grox-font-weight: 400;
-  font-size: 15px;
+  font-size: var(--grox-ui-size, 15px);
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
   text-rendering: geometricPrecision;
@@ -195,6 +245,20 @@ body {
 .lbl,
 .chip {
   font-size: var(--grox-component-font-size, 12px);
+}
+
+.ui-zoom {
+  zoom: var(--grox-ui-scale, 1);
+}
+.titlebar.ui-zoom,
+.statusbar.ui-zoom {
+  width: calc(100% / var(--grox-ui-scale, 1));
+}
+.titlebar {
+  height: var(--grox-titlebar-h, 40px);
+}
+.statusbar {
+  height: var(--grox-statusbar-h, 32px);
 }
 
 /* Transcript-only scaling surfaces */
@@ -211,6 +275,7 @@ body {
   font-size: var(--grox-user-size) !important;
   line-height: var(--grox-prose-leading) !important;
 }
+.md-code pre code,
 .timeline-content .md-code pre code {
   font-size: var(--grox-code-size) !important;
 }
@@ -299,6 +364,18 @@ html[data-theme="light"] {
 html:not([data-theme="light"]) {
   color-scheme: dark;
   --black-hole-light: #ffffff;
+}
+
+.grox-color {
+  padding: 0;
+  appearance: none;
+}
+.grox-color::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+.grox-color::-webkit-color-swatch {
+  border: none;
+  border-radius: 4px;
 }
 
 .grox-range {
@@ -770,7 +847,7 @@ html[data-reduce-motion="1"] .plan-spinner {
   /* micro label — uppercase, tracked, mono, quiet but LEGIBLE */
   .lbl {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--grox-component-font-size, 12px);
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--color-dim);
@@ -804,13 +881,13 @@ html[data-reduce-motion="1"] .plan-spinner {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 28px;
+    height: var(--grox-chip-h, 28px);
     padding: 0 13px;
     border: 1px solid var(--color-line2);
     border-radius: 999px;
     background: transparent;
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: var(--grox-component-font-size, 12px);
     letter-spacing: 0.07em;
     color: var(--color-mute);
     white-space: nowrap;
@@ -900,7 +977,7 @@ html[data-reduce-motion="1"] .plan-spinner {
     overflow: hidden;
     border: 1px solid var(--color-line2);
     border-radius: 8px;
-    background: var(--color-void);
+    background: var(--color-code-bg);
   }
   .md-code-bar {
     display: flex;
@@ -951,8 +1028,8 @@ html[data-reduce-motion="1"] .plan-spinner {
     padding: 0;
     border-radius: 0;
     background: transparent;
-    color: var(--color-fg2);
-    font-size: 12px;
+    color: var(--color-code-fg);
+    font-size: var(--grox-code-size, 12px);
     line-height: 1.7;
   }
 

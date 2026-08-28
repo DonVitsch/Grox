@@ -135,7 +135,7 @@ export function CommandPalette() {
       onMouseDown={() => setOpen(false)}
     >
       <div
-        className="mx-auto mt-[15vh] w-[540px] overflow-hidden rounded-[8px] border border-line3 bg-raise shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-fade-up"
+        className="ui-zoom mx-auto mt-[15vh] w-[540px] overflow-hidden rounded-[8px] border border-line3 bg-raise shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-fade-up"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2.5 border-b border-line2 px-3.5">
