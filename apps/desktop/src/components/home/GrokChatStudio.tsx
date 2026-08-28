@@ -79,6 +79,7 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
     const observer = new ResizeObserver(frame);
     observer.observe(host);
     window.addEventListener("resize", frame);
+    window.addEventListener("grox:main-visible", frame);
     let unlistenMoved: (() => void) | undefined;
     if (inTauri()) {
       void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
@@ -93,6 +94,7 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
       disposed = true;
       observer.disconnect();
       window.removeEventListener("resize", frame);
+      window.removeEventListener("grox:main-visible", frame);
       unlistenMoved?.();
       void hideGrokWebChat();
     };

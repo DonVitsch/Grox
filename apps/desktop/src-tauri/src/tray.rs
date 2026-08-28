@@ -33,6 +33,9 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
 }
 
 pub(crate) fn hide_main_window(app: &AppHandle) {
+    if let Some(chat) = app.get_webview_window("grok-chat") {
+        let _ = chat.hide();
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }

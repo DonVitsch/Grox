@@ -16,6 +16,7 @@ import { StageTransition } from "./components/fx/StageTransition";
 import { PreviewPane } from "./components/preview/PreviewPane";
 import { PlanPreviewPane } from "./components/preview/PlanPreviewPane";
 import { usePreferences } from "./state/preferences";
+import { hideGrokWebChat } from "./lib/grokWebChat";
 import { useI18n } from "./lib/i18n";
 import { WorkbenchPanel } from "./components/chrome/WorkbenchPanel";
 import { AccountSetup } from "./components/settings/AccountSetup";
@@ -77,7 +78,12 @@ export default function App() {
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") {
+        flush();
+        void hideGrokWebChat();
+      } else {
+        window.dispatchEvent(new Event("grox:main-visible"));
+      }
     };
     window.addEventListener("pagehide", flush);
     window.addEventListener("beforeunload", flush);

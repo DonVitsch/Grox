@@ -102,9 +102,8 @@ async function ensureWindow(bounds: WebviewBounds): Promise<ChatWindow | null> {
   if (chat) return chat;
   if (creating) return creating;
   creating = (async () => {
-    const [{ WebviewWindow }, { getCurrentWindow }, { LogicalPosition, LogicalSize }] = await Promise.all([
+    const [{ WebviewWindow }, { LogicalPosition, LogicalSize }] = await Promise.all([
       import("@tauri-apps/api/webviewWindow"),
-      import("@tauri-apps/api/window"),
       import("@tauri-apps/api/dpi"),
     ]);
     const existing = await WebviewWindow.getByLabel(GROK_CHAT_LABEL);
@@ -118,7 +117,6 @@ async function ensureWindow(bounds: WebviewBounds): Promise<ChatWindow | null> {
     const appearance = buildGrokChatAppearanceCss();
     const created = new WebviewWindow(GROK_CHAT_LABEL, {
       url: GROK_WEB_URL,
-      parent: getCurrentWindow(),
       title: "Grok",
       x: screen.x,
       y: screen.y,
@@ -133,6 +131,7 @@ async function ensureWindow(bounds: WebviewBounds): Promise<ChatWindow | null> {
       shadow: false,
       focus: true,
       visible: false,
+      backgroundThrottling: "disabled" as never,
       backgroundColor: appearance.background,
     });
     await new Promise<void>((resolve, reject) => {
@@ -147,6 +146,12 @@ async function ensureWindow(bounds: WebviewBounds): Promise<ChatWindow | null> {
       });
     });
     chat = created as unknown as ChatWindow;
+    void created.once("tauri://destroyed", () => {
+      if (chat === (created as unknown as ChatWindow)) {
+        chat = null;
+        visible = false;
+      }
+    });
     return chat;
   })();
   try {
@@ -188,10 +193,7 @@ export async function hideGrokWebChat(): Promise<void> {
   visible = false;
 }
 
-export async function destroyGrokWebChat(): Promise<void> {
-  const view = chat;
-  chat = null;
-  visible = false;
-  creating = null;
-  if (view) await view.close().catch(() => undefined);
+/** The grok.com window stays alive until the Host process exits. */
+export function grokChatWindowLive(): boolean {
+  return chat !== null;
 }

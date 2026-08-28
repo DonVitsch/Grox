@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { HOME_WORKSPACE_TABS } from "../components/home/workspaceTabs";
-import { boundsUsable, buildGrokChatAppearanceCss, roundBounds } from "./grokWebChat";
+import { rememberHomeWorkspace, rememberedHomeWorkspace } from "./homeWorkspace";
+import { boundsUsable, buildGrokChatAppearanceCss, grokChatWindowLive, roundBounds } from "./grokWebChat";
+
+describe("home workspace memory", () => {
+  it("keeps the last tab after leaving home", () => {
+    rememberHomeWorkspace("chat");
+    expect(rememberedHomeWorkspace()).toBe("chat");
+    rememberHomeWorkspace("conversation");
+    expect(rememberedHomeWorkspace()).toBe("conversation");
+  });
+});
 
 describe("home workspace tabs", () => {
   it("places web chat to the left of conversation", () => {
@@ -42,5 +52,9 @@ describe("grok web appearance css", () => {
     expect(appearance.css).toContain("#eeeeee");
     expect(appearance.css).toContain("PingFang SC");
     expect(appearance.css).toContain("16px");
+  });
+
+  it("does not keep a live window until the host creates one", () => {
+    expect(grokChatWindowLive()).toBe(false);
   });
 });

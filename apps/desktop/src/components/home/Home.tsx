@@ -16,13 +16,14 @@ import { MediaStudio } from "./MediaStudio";
 import { AutomationsStudio } from "./AutomationsStudio";
 import { GrokChatStudio } from "./GrokChatStudio";
 import { WorkspaceTabs, type HomeWorkspaceMode } from "./workspaceTabs";
+import { rememberHomeWorkspace, rememberedHomeWorkspace } from "../../lib/homeWorkspace";
 import { useImeGuard } from "../../lib/ime";
 import { clearDraftBuffer, loadDraftBuffer, saveDraftBuffer } from "../../lib/draftPersistence";
 import { cleanApiError } from "../../lib/runtimeNotice";
 
 export function Home() {
   const { language, t } = useI18n();
-  const [workspaceMode, setWorkspaceMode] = useState<HomeWorkspaceMode>("conversation");
+  const [workspaceMode, setWorkspaceMode] = useState<HomeWorkspaceMode>(rememberedHomeWorkspace);
   const [q, setQ] = useState("");
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -54,6 +55,11 @@ export function Home() {
   const setSettingsOpen = useDesktop((s) => s.setSettingsOpen);
 
   const recent = sessionIndex.filter((session) => !session.archived).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 4);
+
+  const setHomeWorkspace = (mode: HomeWorkspaceMode) => {
+    rememberHomeWorkspace(mode);
+    setWorkspaceMode(mode);
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -164,14 +170,14 @@ export function Home() {
   const currentModel = models.find((item) => item.id === model);
 
   if (workspaceMode === "chat") {
-    return <GrokChatStudio mode={workspaceMode} onChange={setWorkspaceMode} />;
+    return <GrokChatStudio mode={workspaceMode} onChange={setHomeWorkspace} />;
   }
 
   if (workspaceMode !== "conversation") {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-base">
         <div className="home-nebula opacity-40" />
-        <WorkspaceTabs mode={workspaceMode} onChange={setWorkspaceMode} />
+        <WorkspaceTabs mode={workspaceMode} onChange={setHomeWorkspace} />
         <StageTransition stageKey={workspaceMode} variant="panel" className="relative z-[1]">
           {workspaceMode === "automations"
             ? <AutomationsStudio key={`automations:${workspace}`} />
@@ -186,7 +192,7 @@ export function Home() {
   return (
     <div className="relative flex-1 overflow-x-hidden overflow-y-auto bg-base">
       <div className="home-nebula opacity-65" />
-      <WorkspaceTabs mode={workspaceMode} onChange={setWorkspaceMode} />
+      <WorkspaceTabs mode={workspaceMode} onChange={setHomeWorkspace} />
 
       <div className="relative z-[1] mx-auto flex min-h-full w-full max-w-[980px] flex-col items-center justify-center px-6 pb-16 pt-24 sm:px-10">
         <div className="animate-mission-in animate-bh-breathe" style={{ animationDelay: "0.04s" }}>
