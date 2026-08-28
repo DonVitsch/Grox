@@ -69,14 +69,21 @@ fn collect_browser_cookies() -> (Vec<rookie::enums::Cookie>, Vec<String>) {
     ];
     let mut cookies = Vec::new();
     let mut notes = Vec::new();
-    take_browser("chrome", rookie::chrome(Some(domains.clone())), &mut cookies, &mut notes);
-    take_browser("edge", rookie::edge(Some(domains.clone())), &mut cookies, &mut notes);
-    take_browser("brave", rookie::brave(Some(domains.clone())), &mut cookies, &mut notes);
-    take_browser("arc", rookie::arc(Some(domains.clone())), &mut cookies, &mut notes);
-    take_browser("firefox", rookie::firefox(Some(domains.clone())), &mut cookies, &mut notes);
-    take_browser("chromium", rookie::chromium(Some(domains.clone())), &mut cookies, &mut notes);
+    let has_session = |list: &[rookie::enums::Cookie]| {
+        list.iter().any(|cookie| SESSION_COOKIE_NAMES.contains(&cookie.name.as_str()))
+    };
     #[cfg(target_os = "macos")]
     take_browser("safari", rookie::safari(Some(domains.clone())), &mut cookies, &mut notes);
+    take_browser("firefox", rookie::firefox(Some(domains.clone())), &mut cookies, &mut notes);
+    // Chromium browsers need Keychain ("Chrome Safe Storage"). Only probe them
+    // if Safari/Firefox did not already yield a grok.com session.
+    if !has_session(&cookies) {
+        take_browser("chrome", rookie::chrome(Some(domains.clone())), &mut cookies, &mut notes);
+        take_browser("edge", rookie::edge(Some(domains.clone())), &mut cookies, &mut notes);
+        take_browser("brave", rookie::brave(Some(domains.clone())), &mut cookies, &mut notes);
+        take_browser("arc", rookie::arc(Some(domains.clone())), &mut cookies, &mut notes);
+        take_browser("chromium", rookie::chromium(Some(domains.clone())), &mut cookies, &mut notes);
+    }
     let cookies = cookies
         .into_iter()
         .filter(|cookie| session_cookie_domains(&cookie.domain))

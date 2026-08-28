@@ -30,7 +30,6 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncDetail, setSyncDetail] = useState("");
-  const [awaitingBrowser, setAwaitingBrowser] = useState(false);
   const overlay = settingsOpen || paletteOpen || accountSetupOpen || transientOverlay;
   const waitingForLogin = loggedIn === false;
 
@@ -131,8 +130,7 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
   }, [overlay, waitingForLogin]);
 
   const openBrowserLogin = async () => {
-    setAwaitingBrowser(true);
-    setSyncDetail(zh ? "已打开默认浏览器。用 Google 登录 grok.com，完成后再点同步。" : "Default browser opened. Sign in to grok.com with Google, then sync.");
+    setSyncDetail(zh ? "已打开默认浏览器。用 Google 登录 grok.com，完成后再点「同步到 App」。" : "Default browser opened. Sign in to grok.com with Google, then tap Sync.");
     try {
       await grokChatBeginBrowserLogin();
     } catch (cause) {
@@ -146,19 +144,12 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
       const result = await grokChatSyncBrowserSession();
       setSyncDetail(result.detail);
       setLoggedIn(result.loggedIn);
-      if (result.loggedIn) setAwaitingBrowser(false);
     } catch (cause) {
       setSyncDetail(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSyncing(false);
     }
   };
-
-  useEffect(() => {
-    if (!waitingForLogin || !awaitingBrowser) return;
-    const timer = window.setInterval(() => { void syncSession(); }, 4000);
-    return () => window.clearInterval(timer);
-  }, [waitingForLogin, awaitingBrowser]);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-base">
@@ -179,8 +170,8 @@ export function GrokChatStudio({ mode, onChange }: { mode: HomeWorkspaceMode; on
                   </p>
                   <p className="max-w-[460px] text-[13px] leading-relaxed text-fg2">
                     {zh
-                      ? "内嵌窗口没有 Google 登录，也不会带上浏览器里已有的账号。点下面会打开默认浏览器，支持 Google。登录成功后回到这里同步，聊天记录就会进 App。"
-                      : "The embedded view cannot use Google sign-in or your saved browser accounts. Open your default browser, sign in, then sync the session back into Grox."}
+                      ? "内嵌窗口没有 Google 登录。请用系统浏览器登录 grok.com，再点同步。若弹出钥匙串窗口，输入 Mac 开机密码并选「始终允许」——只要一次，是为了读取 grok.com 登录，不是盗号。"
+                      : "The embedded view cannot use Google sign-in. Log in with your system browser, then sync. If macOS asks for the login keychain, enter your Mac password and choose Always Allow — once. Grox only reads grok.com cookies."}
                   </p>
                   <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
                     <button
